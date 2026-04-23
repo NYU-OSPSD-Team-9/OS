@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, HW3]
+  pull_request:
+    branches: [main, HW3]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --all-packages
+
+      - name: Run ruff
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run ruff check .
+
+      - name: Run mypy
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run mypy .
+
+      - name: Run tests with coverage
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run pytest --junitxml=test-results/junit.xml --cov=components --cov-report=html --cov-report=xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/HW3' || github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          if [ -z "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL not set — skipping deploy"
+            exit 0
+          fi
+          echo "Triggering deploy via Render deploy hook..."
+          curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+            --request POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
