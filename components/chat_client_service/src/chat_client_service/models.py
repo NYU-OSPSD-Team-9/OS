@@ -258,26 +258,79 @@ class AiChatResponse(BaseModel):
     reply: str
 
 
-class TicketModel(BaseModel):
-    """Serialized ticket from the issue tracker vertical."""
+class IssueModel(BaseModel):
+    """Serialized issue from the Jira vertical."""
 
-    ticket_id: str
+    issue_id: str
     title: str
     status: str
     description: str
 
     @classmethod
-    def from_dto(cls, ticket: Ticket) -> TicketModel:
+    def from_dto(cls, ticket: Ticket) -> IssueModel:
         """Convert a Ticket DTO to an API model."""
         return cls(
-            ticket_id=ticket.ticket_id,
+            issue_id=ticket.ticket_id,
             title=ticket.title,
             status=ticket.status,
             description=ticket.description,
         )
 
 
-class ListTicketsResponse(BaseModel):
-    """Response model for listing tickets from the issue tracker vertical."""
+TicketModel = IssueModel
 
-    tickets: list[TicketModel]
+
+class ListIssuesResponse(BaseModel):
+    """Response model for listing issues from the Jira vertical."""
+
+    issues: list[IssueModel]
+
+
+ListTicketsResponse = ListIssuesResponse
+
+
+class GetIssueResponse(BaseModel):
+    """Response model for fetching one issue."""
+
+    issue: IssueModel
+
+
+GetTicketResponse = GetIssueResponse
+
+
+class CreateIssueRequest(BaseModel):
+    """Request model for creating an issue."""
+
+    title: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+CreateTicketRequest = CreateIssueRequest
+
+
+class CreateIssueResponse(BaseModel):
+    """Response model for creating one issue."""
+
+    issue: IssueModel
+
+
+CreateTicketResponse = CreateIssueResponse
+
+
+class UpdateIssueStatusRequest(BaseModel):
+    """Request model for changing an issue status."""
+
+    new_status: str = Field(min_length=1)
+
+
+UpdateTicketStatusRequest = UpdateIssueStatusRequest
+
+
+class UpdateIssueStatusResponse(BaseModel):
+    """Response model for issue status updates."""
+
+    status: str
+    issue_id: str
+
+
+UpdateTicketStatusResponse = UpdateIssueStatusResponse

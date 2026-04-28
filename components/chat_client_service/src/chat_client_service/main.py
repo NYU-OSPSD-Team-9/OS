@@ -7,6 +7,7 @@ import os
 import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
@@ -33,19 +34,30 @@ from .models import (
     AuthSessionStatusResponse,
     ChannelModel,
     DeleteMessageResponse,
+    CreateIssueRequest,
+    CreateIssueResponse,
+    GetIssueResponse,
     GetChannelResponse,
     GetMessagesResponse,
     HealthResponse,
     InMemoryAuthSessionStore,
     ListChannelsResponse,
-    ListTicketsResponse,
+    ListIssuesResponse,
     LogoutResponse,
     MessageModel,
     MetricsSnapshot,
     SendMessageRequest,
     ServiceSettings,
-    TicketModel,
+    IssueModel,
+    UpdateIssueStatusRequest,
+    UpdateIssueStatusResponse,
 )
+
+try:
+    from work_mgmt_client_interface.issue import IssueUpdate, Status as IssueStatus
+except ImportError:  # pragma: no cover - optional external dependency
+    IssueUpdate = None  # type: ignore[assignment]
+    IssueStatus = None  # type: ignore[assignment]
 
 TokenClientFactory = Callable[[str], ChatClient]
 
@@ -243,6 +255,262 @@ def _build_metrics_snapshot() -> MetricsSnapshot:
         failure_rate=round(failed / total, 4) if total > 0 else 0.0,
         average_latency_ms=round(avg_latency, 2),
     )
+
+
+class _TicketClientAdapter:
+    """Normalize the legacy Trello-style client to the Jira issue contract."""
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    def get_issue(self, issue_id: str) -> object:
+        return self._client.get_ticket(issue_id)  # type: ignore[attr-defined]
+
+    def get_issues(self, *, status: str = "open") -> list[object]:
+        return list(self._client.get_tickets(status=status))  # type: ignore[attr-defined]
+
+    def create_issue(self, *, title: str, description: str) -> object:
+        return self._client.create_ticket(title, description)  # type: ignore[attr-defined]
+
+    def update_issue(self, issue_id: str, new_status: str) -> None:
+        self._client.update_ticket_status(issue_id, new_status)  # type: ignore[attr-defined]
+
+    def delete_issue(self, issue_id: str) -> None:
+        self._client.delete_ticket(issue_id)  # type: ignore[attr-defined]
+
+
+class _JiraClientAdapter:
+    """Normalize a Jira-style client to the methods used by this service."""
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    def get_issue(self, issue_id: str) -> object:
+        return self._client.get_issue(issue_id)  # type: ignore[attr-defined]
+
+    def get_issues(self, *, status: str = "open") -> list[object]:
+        return list(self._client.get_issues(status=_map_issue_status(status)))  # type: ignore[attr-defined]
+
+    def create_issue(self, *, title: str, description: str) -> object:
+        return self._client.create_issue(title=title, description=description)  # type: ignore[attr-defined]
+
+    def update_issue(self, issue_id: str, new_status: str) -> object:
+        if IssueUpdate is None or IssueStatus is None:
+            raise RuntimeError("Jira issue update types are unavailable.")
+        return self._client.update_issue(  # type: ignore[attr-defined]
+            issue_id,
+            IssueUpdate(status=_map_issue_status(new_status)),
+        )
+
+    def delete_issue(self, issue_id: str) -> None:
+        self._client.delete_issue(issue_id)  # type: ignore[attr-defined]
+
+
+@dataclass
+class _IssueRecord:
+    """Minimal normalized issue record for service responses."""
+
+    ticket_id: str
+    title: str
+    status: str
+    description: str
+
+
+def _normalize_issue_payload(payload: dict[str, Any]) -> _IssueRecord:
+    """Map Jira payload fields into the internal issue shape."""
+    issue_id = str(payload.get("id", ""))
+    title = str(payload.get("title", ""))
+    status = str(payload.get("status", ""))
+    description = str(payload.get("desc", payload.get("description", "")))
+    return _IssueRecord(
+        ticket_id=issue_id,
+        title=title,
+        status=status,
+        description=description,
+    )
+
+
+def _map_to_jira_status(status_name: str) -> str:
+    """Map generic statuses to Team Diamonds service status strings."""
+    normalized = status_name.strip().lower()
+    if normalized in {"todo", "to_do", "open", "backlog", "new"}:
+        return "Status.TO_DO"
+    if normalized in {"in_progress", "in progress", "working", "development"}:
+        return "Status.IN_PROGRESS"
+    if normalized in {"complete", "completed", "done", "closed", "resolved"}:
+        return "Status.COMPLETED"
+    return "Status.CANCELLED"
+
+
+class _RemoteJiraHttpClient:
+    """Direct HTTP adapter for Team Diamonds deployed Jira service."""
+
+    def __init__(self, base_url: str, access_token: str) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._headers = {"Authorization": f"Bearer {access_token}"}
+
+    def get_issue(self, issue_id: str) -> _IssueRecord:
+        try:
+            response = httpx.get(
+                f"{self._base_url}/issues/{issue_id}",
+                headers=self._headers,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"Failed to fetch issue {issue_id}: {exc}"
+            raise ValueError(msg) from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid issue response payload")
+        return _normalize_issue_payload(payload)
+
+    def get_issues(self, *, status: str = "open") -> list[_IssueRecord]:
+        params: dict[str, Any] = {}
+        normalized = status.strip().lower()
+        if status and normalized not in {"open", "todo", "to_do", "backlog", "new"}:
+            params["status"] = _map_to_jira_status(status)
+
+        try:
+            response = httpx.get(
+                f"{self._base_url}/issues",
+                headers=self._headers,
+                params=params,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 422 and params:
+                response = httpx.get(
+                    f"{self._base_url}/issues",
+                    headers=self._headers,
+                    timeout=20.0,
+                )
+                response.raise_for_status()
+            else:
+                msg = f"Failed to fetch issues: {exc}"
+                raise ValueError(msg) from exc
+        except httpx.HTTPError as exc:
+            msg = f"Failed to fetch issues: {exc}"
+            raise ValueError(msg) from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid issues response payload")
+
+        issues = payload.get("issues", [])
+        if not isinstance(issues, list):
+            raise ValueError("Invalid issues list payload")
+        return [
+            _normalize_issue_payload(issue)
+            for issue in issues
+            if isinstance(issue, dict)
+        ]
+
+    def create_issue(self, *, title: str, description: str) -> _IssueRecord:
+        body = {
+            "title": title,
+            "desc": description,
+        }
+        try:
+            response = httpx.post(
+                f"{self._base_url}/issues",
+                headers=self._headers,
+                json=body,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"Failed to create issue: {exc}"
+            raise ValueError(msg) from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid create issue response payload")
+        return _normalize_issue_payload(payload)
+
+    def update_issue(self, issue_id: str, new_status: str) -> _IssueRecord:
+        body = {"status": _map_to_jira_status(new_status)}
+        try:
+            response = httpx.put(
+                f"{self._base_url}/issues/{issue_id}",
+                headers=self._headers,
+                json=body,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"Failed to update issue {issue_id}: {exc}"
+            raise ValueError(msg) from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid update issue response payload")
+        return _normalize_issue_payload(payload)
+
+    def delete_issue(self, issue_id: str) -> None:
+        try:
+            response = httpx.delete(
+                f"{self._base_url}/issues/{issue_id}",
+                headers=self._headers,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"Failed to delete issue {issue_id}: {exc}"
+            raise ValueError(msg) from exc
+
+
+def _map_issue_status(status_name: str) -> object:
+    normalized = status_name.strip().lower()
+    if IssueStatus is None:
+        return normalized
+    if normalized in {"todo", "to_do", "open", "backlog", "new"}:
+        return IssueStatus.TODO
+    if normalized in {"in_progress", "in progress", "working", "development"}:
+        return IssueStatus.IN_PROGRESS
+    if normalized in {"complete", "completed", "done", "closed", "resolved"}:
+        return IssueStatus.COMPLETE
+    return IssueStatus.CANCELLED
+
+
+def _sanitize_bearer_token(token: str) -> str:
+    return "".join(token.split())
+
+
+def _build_issue_client() -> object:
+    """Build the Jira-first issue tracker client from environment settings."""
+    jira_service_base_url = os.getenv("JIRA_SERVICE_BASE_URL")
+    jira_service_access_token = os.getenv("JIRA_SERVICE_ACCESS_TOKEN")
+
+    if jira_service_base_url and jira_service_access_token:
+        cleaned_token = _sanitize_bearer_token(jira_service_access_token)
+        if cleaned_token:
+            return _RemoteJiraHttpClient(
+                base_url=jira_service_base_url,
+                access_token=cleaned_token,
+            )
+
+    try:
+        from jira_service_adapter import get_client as get_jira_client
+
+        if jira_service_base_url and jira_service_access_token:
+            return _JiraClientAdapter(get_jira_client(interactive=False))
+    except ImportError:
+        pass
+
+    from http_ticket_client_impl.client import HttpTicketClient
+
+    ticket_base_url = os.getenv("TICKET_SERVICE_BASE_URL")
+    if not ticket_base_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="JIRA_SERVICE_BASE_URL or TICKET_SERVICE_BASE_URL is not configured",
+        )
+
+    board_id = os.getenv("TICKET_BOARD_ID", "")
+    return _TicketClientAdapter(HttpTicketClient(ticket_base_url, board_id=board_id))
 
 
 _DASHBOARD_HTML = """\
@@ -655,6 +923,66 @@ def ai_chat(
                 for m in client.get_messages(channel_id=channel_id, limit=limit)
             ]),
         ),
+        AiTool(
+            name="get_issues",
+            description="List Jira issues filtered by status",
+            parameters={
+                "status": {
+                    "type": "string",
+                    "description": "Issue status (open, in_progress, complete, cancelled, etc.)",
+                },
+            },
+            handler=lambda status="open": json.dumps([
+                {
+                    "issue_id": ticket.ticket_id,
+                    "title": ticket.title,
+                    "status": ticket.status,
+                    "description": ticket.description,
+                }
+                for ticket in _build_issue_client().get_issues(status=status)
+            ]),
+        ),
+        AiTool(
+            name="create_issue",
+            description="Create a Jira issue in the external issue tracker",
+            parameters={
+                "title": {"type": "string", "description": "Issue title"},
+                "description": {
+                    "type": "string",
+                    "description": "Issue description",
+                },
+            },
+            handler=lambda title, description: json.dumps({
+                "issue_id": _build_issue_client().create_issue(
+                    title=title,
+                    description=description,
+                ).ticket_id,
+                "status": "created",
+            }),
+        ),
+        AiTool(
+            name="update_issue_status",
+            description="Update Jira issue status in the external issue tracker",
+            parameters={
+                "issue_id": {
+                    "type": "string",
+                    "description": "Issue identifier",
+                },
+                "new_status": {
+                    "type": "string",
+                    "description": "New status value",
+                },
+            },
+            handler=lambda issue_id, new_status: json.dumps({
+                "issue_id": issue_id,
+                "new_status": new_status,
+                "result": _build_issue_client().update_issue(
+                    issue_id=issue_id,
+                    new_status=new_status,
+                )
+                or "ok",
+            }),
+        ),
     ]
 
     try:
@@ -676,35 +1004,121 @@ def ai_chat(
     return AiChatResponse(reply=reply)
 
 
-@app.get("/tickets", response_model=ListTicketsResponse)
-def list_tickets(
-    ticket_status: Annotated[str, Query()] = "open",
-) -> ListTicketsResponse:
-    """Fetch open tickets from Team 3's Trello-based issue tracker.
+@app.get("/issues", response_model=ListIssuesResponse)
+def list_issues(
+    issue_status: Annotated[str, Query(alias="ticket_status")] = "open",
+) -> ListIssuesResponse:
+    """Fetch issues from the selected Jira integration path.
 
-    Reads TICKET_SERVICE_BASE_URL and TICKET_BOARD_ID from the
+    Reads JIRA_SERVICE_BASE_URL / JIRA_SERVICE_ACCESS_TOKEN or the legacy
+    TICKET_SERVICE_BASE_URL / TICKET_BOARD_ID fallback from the
     environment to locate the external ticket service.
     """
-    from http_ticket_client_impl.client import HttpTicketClient
-
-    ticket_base_url = os.getenv("TICKET_SERVICE_BASE_URL")
-    if not ticket_base_url:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="TICKET_SERVICE_BASE_URL is not configured",
-        )
-    board_id = os.getenv("TICKET_BOARD_ID", "")
-    ticket_client = HttpTicketClient(ticket_base_url, board_id=board_id)
+    issue_client = _build_issue_client()
     try:
-        tickets = ticket_client.get_tickets(status=ticket_status)
+        issues = issue_client.get_issues(status=issue_status)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
-    return ListTicketsResponse(
-        tickets=[TicketModel.from_dto(t) for t in tickets],
+    return ListIssuesResponse(
+        issues=[IssueModel.from_dto(t) for t in issues],
     )
+
+
+@app.get("/tickets", response_model=ListIssuesResponse)
+def list_tickets(
+    ticket_status: Annotated[str, Query()] = "open",
+) -> ListIssuesResponse:
+    """Backward-compatible alias for /issues."""
+    return list_issues(issue_status=ticket_status)
+
+
+@app.get("/issues/{issue_id}", response_model=GetIssueResponse)
+def get_issue(issue_id: str) -> GetIssueResponse:
+    """Fetch one issue by ID from the selected Jira provider."""
+    issue_client = _build_issue_client()
+    try:
+        issue = issue_client.get_issue(issue_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return GetIssueResponse(issue=IssueModel.from_dto(issue))
+
+
+@app.get("/tickets/{ticket_id}", response_model=GetIssueResponse)
+def get_ticket(ticket_id: str) -> GetIssueResponse:
+    """Backward-compatible alias for /issues/{issue_id}."""
+    return get_issue(issue_id=ticket_id)
+
+
+@app.post(
+    "/issues",
+    response_model=CreateIssueResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_issue(payload: CreateIssueRequest) -> CreateIssueResponse:
+    """Create an issue in the selected Jira provider."""
+    issue_client = _build_issue_client()
+    try:
+        issue = issue_client.create_issue(
+            title=payload.title,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return CreateIssueResponse(issue=IssueModel.from_dto(issue))
+
+
+@app.post(
+    "/tickets",
+    response_model=CreateIssueResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ticket(payload: CreateIssueRequest) -> CreateIssueResponse:
+    """Backward-compatible alias for /issues."""
+    return create_issue(payload)
+
+
+@app.patch(
+    "/issues/{issue_id}/status",
+    response_model=UpdateIssueStatusResponse,
+)
+def update_issue_status(
+    issue_id: str,
+    payload: UpdateIssueStatusRequest,
+) -> UpdateIssueStatusResponse:
+    """Update an issue's status in the selected Jira provider."""
+    issue_client = _build_issue_client()
+    try:
+        issue_client.update_issue(
+            issue_id=issue_id,
+            new_status=payload.new_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return UpdateIssueStatusResponse(status="ok", issue_id=issue_id)
+
+
+@app.patch(
+    "/tickets/{ticket_id}/status",
+    response_model=UpdateIssueStatusResponse,
+)
+def update_ticket_status(
+    ticket_id: str,
+    payload: UpdateIssueStatusRequest,
+) -> UpdateIssueStatusResponse:
+    """Backward-compatible alias for /issues/{issue_id}/status."""
+    return update_issue_status(issue_id=ticket_id, payload=payload)
 
 
 def create_app() -> FastAPI:

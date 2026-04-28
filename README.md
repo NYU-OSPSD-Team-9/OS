@@ -59,6 +59,29 @@ If `CHAT_CLIENT_SERVICE_SESSION_ID` is not set, the adapter creates a service au
 - `CHAT_CLIENT_SERVICE_OPEN_BROWSER`: whether the adapter should open the browser automatically.
 - `CHAT_CLIENT_SERVICE_AUTH_TIMEOUT_SECONDS`: how long the adapter waits for OAuth completion.
 - `CHAT_CLIENT_SERVICE_POLL_INTERVAL_SECONDS`: how often the adapter polls auth status.
+- `JIRA_SERVICE_BASE_URL`: base URL of the Jira service adapter.
+- `JIRA_SERVICE_ACCESS_TOKEN`: bearer token for the Jira adapter.
+- `TICKET_SERVICE_BASE_URL`: legacy fallback for the previous tracker adapter.
+- `TICKET_BOARD_ID`: legacy fallback board identifier.
+
+## Issue Tracker Integration (HW3)
+
+This service is being updated to speak the Jira contract first, while keeping
+the previous tracker path as a fallback until the Jira team sends live details.
+
+Implemented endpoints:
+
+- `GET /issues?ticket_status=open`: list issues by status.
+- `GET /issues/{issue_id}`: fetch one issue by ID.
+- `POST /issues`: create an issue.
+- `PATCH /issues/{issue_id}/status`: update issue status.
+- Legacy aliases remain available on `/tickets` during transition.
+
+The AI endpoint `POST /ai/chat` now also exposes issue tools:
+
+- `get_issues`
+- `create_issue`
+- `update_issue_status`
 
 ## Generated Client
 
