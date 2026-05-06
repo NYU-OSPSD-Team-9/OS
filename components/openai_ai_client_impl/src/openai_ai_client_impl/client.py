@@ -11,6 +11,7 @@ from openai import OpenAI
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 _DEFAULT_MAX_TOKENS = 1024
+_MAX_TOOL_ROUNDS = 5
 
 
 def _ai_tool_to_openai(tool: AiTool) -> dict[str, Any]:
@@ -100,7 +101,8 @@ class OpenAiClient(AiClient):
             {"role": "user", "content": prompt},
         ]
 
-        while True:
+        tool_rounds = 0
+        while tool_rounds < _MAX_TOOL_ROUNDS:
             response = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
@@ -113,21 +115,32 @@ class OpenAiClient(AiClient):
                 return choice.message.content or ""
 
             if choice.finish_reason == "tool_calls":
-                # Append assistant message with tool_calls
                 messages.append(choice.message.model_dump())
                 for tool_call in choice.message.tool_calls or []:
                     if not hasattr(tool_call, "function"):
                         continue
                     fn_name = tool_call.function.name
-                    fn_args = json.loads(tool_call.function.arguments)
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError as exc:
+                        err_msg = f"Malformed tool arguments: {exc}"
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": err_msg}),
+                        })
+                        continue
                     result = self._execute_tool(fn_name, fn_args, tool_map)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": result,
                     })
+                tool_rounds += 1
             else:
                 return choice.message.content or ""
+
+        return "Max tool rounds exceeded. Please try again."
 
     def _execute_tool(
         self,

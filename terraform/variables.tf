@@ -19,13 +19,13 @@ variable "region" {
 variable "repo_url" {
   description = "GitHub repository URL."
   type        = string
-  default     = "https://github.com/HarshithKoriRaj/CS-GY-9223-Open-Source"
+  default     = "https://github.com/NYU-OSPSD-Team-9/OS"
 }
 
 variable "branch" {
   description = "Git branch to deploy from."
   type        = string
-  default     = "feat/hw3"
+  default     = "HW3"
 }
 
 variable "build_command" {

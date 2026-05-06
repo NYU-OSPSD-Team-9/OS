@@ -33,14 +33,15 @@ from .models import (
     AuthSessionResponse,
     AuthSessionStatusResponse,
     ChannelModel,
-    DeleteMessageResponse,
     CreateIssueRequest,
     CreateIssueResponse,
-    GetIssueResponse,
+    DeleteMessageResponse,
     GetChannelResponse,
+    GetIssueResponse,
     GetMessagesResponse,
     HealthResponse,
     InMemoryAuthSessionStore,
+    IssueModel,
     ListChannelsResponse,
     ListIssuesResponse,
     LogoutResponse,
@@ -48,17 +49,12 @@ from .models import (
     MetricsSnapshot,
     SendMessageRequest,
     ServiceSettings,
-    IssueModel,
     UpdateIssueStatusRequest,
     UpdateIssueStatusResponse,
 )
 
-try:
-    from work_mgmt_client_interface.issue import IssueUpdate, Status as IssueStatus
-except ImportError:  # pragma: no cover - optional external dependency
-    IssueUpdate = None  # type: ignore[assignment]
-    IssueStatus = None  # type: ignore[assignment]
-
+IssueUpdate = None
+IssueStatus = None
 TokenClientFactory = Callable[[str], ChatClient]
 
 
@@ -297,7 +293,7 @@ class _JiraClientAdapter:
     def update_issue(self, issue_id: str, new_status: str) -> object:
         if IssueUpdate is None or IssueStatus is None:
             raise RuntimeError("Jira issue update types are unavailable.")
-        return self._client.update_issue(  # type: ignore[attr-defined]
+        return self._client.update_issue(
             issue_id,
             IssueUpdate(status=_map_issue_status(new_status)),
         )
@@ -341,7 +337,7 @@ def _map_to_jira_status(status_name: str) -> str:
         return "Status.COMPLETED"
     return "Status.CANCELLED"
 
-
+_HTTP_UNPROCESSABLE_ENTITY = 422
 class _RemoteJiraHttpClient:
     """Direct HTTP adapter for Team Diamonds deployed Jira service."""
 
@@ -363,7 +359,7 @@ class _RemoteJiraHttpClient:
 
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Invalid issue response payload")
+            raise TypeError("Invalid issue response payload")
         return _normalize_issue_payload(payload)
 
     def get_issues(self, *, status: str = "open") -> list[_IssueRecord]:
@@ -381,7 +377,11 @@ class _RemoteJiraHttpClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 422 and params:
+            if (
+                exc.response is not None
+                and exc.response.status_code == _HTTP_UNPROCESSABLE_ENTITY
+                and params
+            ):
                 response = httpx.get(
                     f"{self._base_url}/issues",
                     headers=self._headers,
@@ -397,11 +397,11 @@ class _RemoteJiraHttpClient:
 
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Invalid issues response payload")
+            raise TypeError("Invalid issues response payload")
 
         issues = payload.get("issues", [])
         if not isinstance(issues, list):
-            raise ValueError("Invalid issues list payload")
+            raise TypeError("Invalid issues list payload")
         return [
             _normalize_issue_payload(issue)
             for issue in issues
@@ -427,7 +427,7 @@ class _RemoteJiraHttpClient:
 
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Invalid create issue response payload")
+            raise TypeError("Invalid create issue response payload")
         return _normalize_issue_payload(payload)
 
     def update_issue(self, issue_id: str, new_status: str) -> _IssueRecord:
@@ -446,7 +446,7 @@ class _RemoteJiraHttpClient:
 
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Invalid update issue response payload")
+            raise TypeError("Invalid update issue response payload")
         return _normalize_issue_payload(payload)
 
     def delete_issue(self, issue_id: str) -> None:
@@ -479,7 +479,7 @@ def _sanitize_bearer_token(token: str) -> str:
     return "".join(token.split())
 
 
-def _build_issue_client() -> object:
+def _build_issue_client() -> _TicketClientAdapter | _RemoteJiraHttpClient:
     """Build the Jira-first issue tracker client from environment settings."""
     jira_service_base_url = os.getenv("JIRA_SERVICE_BASE_URL")
     jira_service_access_token = os.getenv("JIRA_SERVICE_ACCESS_TOKEN")
@@ -492,13 +492,6 @@ def _build_issue_client() -> object:
                 access_token=cleaned_token,
             )
 
-    try:
-        from jira_service_adapter import get_client as get_jira_client
-
-        if jira_service_base_url and jira_service_access_token:
-            return _JiraClientAdapter(get_jira_client(interactive=False))
-    except ImportError:
-        pass
 
     from http_ticket_client_impl.client import HttpTicketClient
 
@@ -929,15 +922,17 @@ def ai_chat(
             parameters={
                 "status": {
                     "type": "string",
-                    "description": "Issue status (open, in_progress, complete, cancelled, etc.)",
+                    "description": (
+                        "Issue status (open, in_progress, complete, cancelled, etc.)"
+                    ),
                 },
             },
             handler=lambda status="open": json.dumps([
                 {
-                    "issue_id": ticket.ticket_id,
-                    "title": ticket.title,
-                    "status": ticket.status,
-                    "description": ticket.description,
+                    "issue_id": ticket.ticket_id,  # type: ignore[attr-defined]
+                    "title": ticket.title,  # type: ignore[attr-defined]
+                    "status": ticket.status,  # type: ignore[attr-defined]
+                    "description": ticket.description,  # type: ignore[attr-defined]
                 }
                 for ticket in _build_issue_client().get_issues(status=status)
             ]),
@@ -953,7 +948,7 @@ def ai_chat(
                 },
             },
             handler=lambda title, description: json.dumps({
-                "issue_id": _build_issue_client().create_issue(
+                "issue_id": _build_issue_client().create_issue(  # type: ignore[attr-defined]
                     title=title,
                     description=description,
                 ).ticket_id,
@@ -1023,7 +1018,7 @@ def list_issues(
             detail=str(exc),
         ) from exc
     return ListIssuesResponse(
-        issues=[IssueModel.from_dto(t) for t in issues],
+        issues=[IssueModel.from_dto(t) for t in issues],  # type: ignore[arg-type]
     )
 
 
@@ -1046,7 +1041,7 @@ def get_issue(issue_id: str) -> GetIssueResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
-    return GetIssueResponse(issue=IssueModel.from_dto(issue))
+    return GetIssueResponse(issue=IssueModel.from_dto(issue))  # type: ignore[arg-type]
 
 
 @app.get("/tickets/{ticket_id}", response_model=GetIssueResponse)
@@ -1073,7 +1068,7 @@ def create_issue(payload: CreateIssueRequest) -> CreateIssueResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
-    return CreateIssueResponse(issue=IssueModel.from_dto(issue))
+    return CreateIssueResponse(issue=IssueModel.from_dto(issue))  # type: ignore[arg-type]
 
 
 @app.post(

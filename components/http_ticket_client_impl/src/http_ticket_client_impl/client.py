@@ -33,7 +33,7 @@ class HttpTicketClient(TicketClient):
 
         Args:
             base_url: Base URL of Team 3's service
-                      (e.g. ``"https://ospsd-team-03.onrender.com"``).
+                      (e.g. ``"https://issue-tracker-service-793028870171.us-central1.run.app"``).
             board_id: Trello board ID to query.
 
         """
@@ -125,16 +125,22 @@ class HttpTicketClient(TicketClient):
         ticket_id: str,
         new_status: str,
     ) -> None:
-        """Close an issue (Team 3 only supports closing).
+        """Update issue status. Only 'closed' is supported by Team 3's API.
 
         Args:
             ticket_id: Issue identifier.
-            new_status: Ignored — Team 3's API only supports close.
+            new_status: Target status. Only 'closed' is supported.
 
         Raises:
-            ValueError: If not found or on HTTP error.
+            ValueError: If new_status is not 'closed' or on HTTP error.
 
         """
+        if new_status != "closed":
+            msg = (
+                f"Unsupported status '{new_status}'. "
+                "Team 3's API only supports 'closed'."
+            )
+            raise ValueError(msg)
         try:
             response = httpx.post(
                 f"{self._base_url}/boards/{self._board_id}"
