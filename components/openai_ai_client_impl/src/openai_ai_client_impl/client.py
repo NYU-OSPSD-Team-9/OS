@@ -24,6 +24,7 @@ def _ai_tool_to_openai(tool: AiTool) -> dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": tool.parameters,
+                "required": list(tool.parameters.keys()),
             },
         },
     }

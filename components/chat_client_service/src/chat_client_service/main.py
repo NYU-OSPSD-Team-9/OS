@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -80,6 +81,8 @@ SessionHeader = Annotated[str | None, Header(alias="X-Session-ID")]
 # Simple in-process telemetry counters
 # ---------------------------------------------------------------------------
 
+
+_metrics_lock = threading.Lock()
 _metrics: dict[str, float] = {
     "total_requests": 0,
     "successful_requests": 0,
@@ -97,13 +100,14 @@ async def _telemetry_middleware(
     response: Response = await call_next(request)  # type: ignore[misc]
     elapsed_ms = (time.perf_counter() - start) * 1000.0
 
-    _metrics["total_requests"] += 1
-    _metrics["total_latency_ms"] += elapsed_ms
+    with _metrics_lock:
+        _metrics["total_requests"] += 1
+        _metrics["total_latency_ms"] += elapsed_ms
 
-    if response.status_code < 400:  # noqa: PLR2004
-        _metrics["successful_requests"] += 1
-    else:
-        _metrics["failed_requests"] += 1
+        if response.status_code < 400:  # noqa: PLR2004
+            _metrics["successful_requests"] += 1
+        else:
+            _metrics["failed_requests"] += 1
 
     return response
 
@@ -620,12 +624,12 @@ def metrics_prometheus() -> Response:
         "# HELP chat_requests_total Total HTTP requests handled.",
         "# TYPE chat_requests_total counter",
         f"chat_requests_total {snap.total_requests}",
-        "# HELP chat_requests_success Successful HTTP requests.",
-        "# TYPE chat_requests_success counter",
-        f"chat_requests_success {snap.successful_requests}",
-        "# HELP chat_requests_failed Failed HTTP requests.",
-        "# TYPE chat_requests_failed counter",
-        f"chat_requests_failed {snap.failed_requests}",
+        "# HELP chat_requests_success_total Successful HTTP requests.",
+        "# TYPE chat_requests_success_total counter",
+        f"chat_requests_success_total {snap.successful_requests}",
+        "# HELP chat_requests_failed_total Failed HTTP requests.",
+        "# TYPE chat_requests_failed_total counter",
+        f"chat_requests_failed_total {snap.failed_requests}",
         "# HELP chat_success_rate Ratio of successful to total requests.",
         "# TYPE chat_success_rate gauge",
         f"chat_success_rate {snap.success_rate}",
