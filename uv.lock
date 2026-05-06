@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 members = [
     "ai-client-api",
     "chat-client-adapter",
-    "chat-client-api",
     "chat-client-service",
     "chat-client-service-api-client",
     "http-ticket-client-impl",
@@ -178,7 +177,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chat-client-api", editable = "components/chat_client_api" },
+    { name = "chat-client-api", git = "https://github.com/HarshithKoriRaj/Shared-API" },
     { name = "chat-client-service-api-client", editable = "components/chat_client_service_api_client" },
     { name = "httpx", specifier = ">=0.23.0" },
 ]
@@ -186,7 +185,7 @@ requires-dist = [
 [[package]]
 name = "chat-client-api"
 version = "0.1.0"
-source = { editable = "components/chat_client_api" }
+source = { git = "https://github.com/HarshithKoriRaj/Shared-API#ebb37e189065760f2090f1488d376485b7b56b20" }
 
 [[package]]
 name = "chat-client-service"
@@ -205,7 +204,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ai-client-api", editable = "components/ai_client_api" },
-    { name = "chat-client-api", editable = "components/chat_client_api" },
+    { name = "chat-client-api", git = "https://github.com/HarshithKoriRaj/Shared-API" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "slack-client-impl", editable = "components/slack_client_impl" },
@@ -1237,7 +1236,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chat-client-api", editable = "components/chat_client_api" },
+    { name = "chat-client-api", git = "https://github.com/HarshithKoriRaj/Shared-API" },
     { name = "slack-sdk", specifier = ">=3.33.5" },
 ]
 

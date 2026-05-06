@@ -23,7 +23,6 @@ dev = [
 
 [tool.uv.workspace]
 members = [
-    "components/chat_client_api",
     "components/chat_client_adapter",
     "components/slack_client_impl",
     "components/chat_client_service",
@@ -35,7 +34,7 @@ members = [
 ]
 
 [tool.uv.sources]
-chat-client-api = { workspace = true }
+chat-client-api = { git = "https://github.com/HarshithKoriRaj/Shared-API" }
 chat-client-adapter = { workspace = true }
 slack-client-impl = { workspace = true }
 chat-client-service = { workspace = true }
@@ -91,7 +90,6 @@ exclude = [
 testpaths = [
     "tests",
     "components/chat_client_adapter/tests",
-    "components/chat_client_api/tests",
     "components/slack_client_impl/tests",
     "components/chat_client_service/tests",
     "components/ai_client_api/tests",
