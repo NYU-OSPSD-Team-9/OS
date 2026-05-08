@@ -234,15 +234,30 @@ class DeleteMessageResponse(BaseModel):
     status: str
 
 
+class RouteMetricsEntry(BaseModel):
+    """Per-(route, method) breakdown of request volume and latency."""
+
+    route: str
+    method: str
+    count: int
+    ok_count: int
+    domain_error_count: int
+    infra_error_count: int
+    average_latency_ms: float
+
+
 class MetricsSnapshot(BaseModel):
     """Current telemetry snapshot."""
 
     total_requests: int
     successful_requests: int
     failed_requests: int
+    domain_error_count: int = 0
+    infra_error_count: int = 0
     success_rate: float
     failure_rate: float
     average_latency_ms: float
+    by_route: list[RouteMetricsEntry] = []
 
 
 class AiChatRequest(BaseModel):

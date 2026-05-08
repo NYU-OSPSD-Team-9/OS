@@ -90,6 +90,45 @@ def test_dashboard_returns_html() -> None:
     assert "/metrics" in response.text
 
 
+def test_metrics_records_per_route_breakdown() -> None:
+    """The /metrics snapshot should expose per-route, per-method, per-status counts."""
+    expected_health_calls = 2
+    client.get("/health")
+    client.get("/health")
+    client.get("/this-route-does-not-exist")  # 404 → domain_error
+
+    response = client.get("/metrics")
+    data = response.json()
+
+    assert data["domain_error_count"] >= 1
+    assert data["successful_requests"] >= expected_health_calls
+
+    by_route = {(entry["route"], entry["method"]): entry for entry in data["by_route"]}
+    health_entry = by_route[("/health", "GET")]
+    assert health_entry["ok_count"] >= expected_health_calls
+    assert health_entry["count"] == health_entry["ok_count"] + health_entry[
+        "domain_error_count"
+    ] + health_entry["infra_error_count"]
+
+
+def test_prometheus_exposes_labeled_series() -> None:
+    """Prometheus output should include per-route counters with labels."""
+    client.get("/health")
+    client.get("/health")
+    client.get("/dashboard")
+
+    response = client.get("/metrics/prometheus")
+    body = response.text
+
+    assert "chat_requests_by_route_total" in body
+    assert 'route="/health"' in body
+    assert 'method="GET"' in body
+    assert 'status_class="ok"' in body
+    assert "chat_request_latency_ms_avg" in body
+    assert "chat_requests_domain_errors_total" in body
+    assert "chat_requests_infra_errors_total" in body
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------

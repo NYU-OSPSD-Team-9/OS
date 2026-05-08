@@ -26,6 +26,15 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
+from work_mgmt_client_interface import (
+    IssueTrackerClient,
+)
+from work_mgmt_client_interface import (
+    IssueUpdate as DiamondsIssueUpdate,
+)
+from work_mgmt_client_interface import (
+    Status as DiamondsStatus,
+)
 
 from .models import (
     AiChatRequest,
@@ -48,6 +57,7 @@ from .models import (
     LogoutResponse,
     MessageModel,
     MetricsSnapshot,
+    RouteMetricsEntry,
     SendMessageRequest,
     ServiceSettings,
     UpdateIssueStatusRequest,
@@ -87,27 +97,71 @@ _metrics: dict[str, float] = {
     "total_requests": 0,
     "successful_requests": 0,
     "failed_requests": 0,
+    "domain_errors": 0,
+    "infra_errors": 0,
     "total_latency_ms": 0,
 }
+
+_HTTP_CLIENT_ERROR_FLOOR = 400
+_HTTP_SERVER_ERROR_FLOOR = 500
+
+_labeled_counts: dict[tuple[str, str, str], int] = {}
+_labeled_latency_sum: dict[tuple[str, str], float] = {}
+_labeled_latency_count: dict[tuple[str, str], int] = {}
+
+
+def _classify_status(status_code: int) -> str:
+    """Map HTTP status code to ok / domain_error / infra_error."""
+    if status_code < _HTTP_CLIENT_ERROR_FLOOR:
+        return "ok"
+    if status_code < _HTTP_SERVER_ERROR_FLOOR:
+        return "domain_error"
+    return "infra_error"
+
+
+def _route_template(request: Request) -> str:
+    """Return the matched FastAPI route template, or the literal path."""
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str) and template:
+        return template
+    return request.url.path
 
 
 @app.middleware("http")
 async def _telemetry_middleware(
     request: Request, call_next: Callable[[Request], object],
 ) -> Response:
-    """Track request count, latency, and success/failure rate."""
+    """Track request count, latency, and labeled success/failure rate."""
     start = time.perf_counter()
     response: Response = await call_next(request)  # type: ignore[misc]
     elapsed_ms = (time.perf_counter() - start) * 1000.0
+    template = _route_template(request)
+    method = request.method
+    status_class = _classify_status(response.status_code)
+    label_key = (template, method, status_class)
+    latency_key = (template, method)
 
     with _metrics_lock:
         _metrics["total_requests"] += 1
         _metrics["total_latency_ms"] += elapsed_ms
 
-        if response.status_code < 400:  # noqa: PLR2004
+        if status_class == "ok":
             _metrics["successful_requests"] += 1
         else:
             _metrics["failed_requests"] += 1
+            if status_class == "domain_error":
+                _metrics["domain_errors"] += 1
+            else:
+                _metrics["infra_errors"] += 1
+
+        _labeled_counts[label_key] = _labeled_counts.get(label_key, 0) + 1
+        _labeled_latency_sum[latency_key] = (
+            _labeled_latency_sum.get(latency_key, 0.0) + elapsed_ms
+        )
+        _labeled_latency_count[latency_key] = (
+            _labeled_latency_count.get(latency_key, 0) + 1
+        )
 
     return response
 
@@ -141,6 +195,9 @@ def reset_service_state() -> None:
     _session_store.reset()
     for key in _metrics:
         _metrics[key] = 0
+    _labeled_counts.clear()
+    _labeled_latency_sum.clear()
+    _labeled_latency_count.clear()
 
 
 def _build_login_url(settings: ServiceSettings, session_id: str) -> str:
@@ -246,15 +303,142 @@ def _build_metrics_snapshot() -> MetricsSnapshot:
     total = _metrics["total_requests"]
     success = _metrics["successful_requests"]
     failed = _metrics["failed_requests"]
+    domain_errors = _metrics["domain_errors"]
+    infra_errors = _metrics["infra_errors"]
     avg_latency = _metrics["total_latency_ms"] / total if total > 0 else 0.0
+
+    by_route: list[RouteMetricsEntry] = []
+    seen_routes: set[tuple[str, str]] = set()
+    for (template, method) in _labeled_latency_count:
+        seen_routes.add((template, method))
+    for (template, method, _status_class) in _labeled_counts:
+        seen_routes.add((template, method))
+    for (template, method) in sorted(seen_routes):
+        ok_count = _labeled_counts.get((template, method, "ok"), 0)
+        domain_count = _labeled_counts.get((template, method, "domain_error"), 0)
+        infra_count = _labeled_counts.get((template, method, "infra_error"), 0)
+        latency_sum = _labeled_latency_sum.get((template, method), 0.0)
+        latency_count = _labeled_latency_count.get((template, method), 0)
+        avg = round(latency_sum / latency_count, 2) if latency_count > 0 else 0.0
+        by_route.append(
+            RouteMetricsEntry(
+                route=template,
+                method=method,
+                count=ok_count + domain_count + infra_count,
+                ok_count=ok_count,
+                domain_error_count=domain_count,
+                infra_error_count=infra_count,
+                average_latency_ms=avg,
+            ),
+        )
+
     return MetricsSnapshot(
         total_requests=int(total),
         successful_requests=int(success),
         failed_requests=int(failed),
+        domain_error_count=int(domain_errors),
+        infra_error_count=int(infra_errors),
         success_rate=round(success / total, 4) if total > 0 else 0.0,
         failure_rate=round(failed / total, 4) if total > 0 else 0.0,
         average_latency_ms=round(avg_latency, 2),
+        by_route=by_route,
     )
+
+
+_diamonds_client_factory: Callable[[], IssueTrackerClient] | None = None
+
+
+def register_diamonds_client_factory(
+    factory: Callable[[], IssueTrackerClient] | None,
+) -> None:
+    """Register or clear the cross-vertical Diamonds IssueTrackerClient factory.
+
+    Following the same get_client/register_client pattern as HW1, this lets
+    consumers swap the Diamonds-backed implementation transparently.
+    """
+    global _diamonds_client_factory  # noqa: PLW0603
+    _diamonds_client_factory = factory
+
+
+def get_diamonds_client() -> IssueTrackerClient | None:
+    """Return the registered Diamonds IssueTrackerClient, or None if unset."""
+    if _diamonds_client_factory is None:
+        return None
+    return _diamonds_client_factory()
+
+
+_DIAMONDS_TO_INTERNAL_STATUS: dict[DiamondsStatus, str] = {
+    DiamondsStatus.TODO: "open",
+    DiamondsStatus.IN_PROGRESS: "in_progress",
+    DiamondsStatus.COMPLETE: "complete",
+    DiamondsStatus.CANCELLED: "cancelled",
+}
+
+_INTERNAL_TO_DIAMONDS_STATUS: dict[str, DiamondsStatus] = {
+    "open": DiamondsStatus.TODO,
+    "todo": DiamondsStatus.TODO,
+    "in_progress": DiamondsStatus.IN_PROGRESS,
+    "in-progress": DiamondsStatus.IN_PROGRESS,
+    "doing": DiamondsStatus.IN_PROGRESS,
+    "complete": DiamondsStatus.COMPLETE,
+    "completed": DiamondsStatus.COMPLETE,
+    "done": DiamondsStatus.COMPLETE,
+    "closed": DiamondsStatus.COMPLETE,
+    "resolved": DiamondsStatus.COMPLETE,
+    "cancelled": DiamondsStatus.CANCELLED,
+    "canceled": DiamondsStatus.CANCELLED,
+}
+
+
+def _to_diamonds_status(value: str) -> DiamondsStatus:
+    """Map a free-form status string to the Diamonds Status enum."""
+    return _INTERNAL_TO_DIAMONDS_STATUS.get(value.lower(), DiamondsStatus.TODO)
+
+
+def _from_diamonds_issue(issue: Any) -> _IssueRecord:
+    """Convert a Diamonds Issue (ABC) into the internal issue record."""
+    status = issue.status
+    status_str = (
+        _DIAMONDS_TO_INTERNAL_STATUS[status]
+        if isinstance(status, DiamondsStatus)
+        else str(status)
+    )
+    return _IssueRecord(
+        ticket_id=str(issue.id),
+        title=str(issue.title),
+        status=status_str,
+        description=str(issue.description),
+    )
+
+
+class _DiamondsClientAdapter:
+    """Adapt Team Diamonds' IssueTrackerClient to our internal issue shape."""
+
+    def __init__(self, client: IssueTrackerClient) -> None:
+        self._client = client
+
+    def get_issue(self, issue_id: str) -> _IssueRecord:
+        return _from_diamonds_issue(self._client.get_issue(issue_id))
+
+    def get_issues(self, *, status: str = "open") -> list[_IssueRecord]:
+        diamonds_status = _to_diamonds_status(status)
+        return [
+            _from_diamonds_issue(issue)
+            for issue in self._client.get_issues(status=diamonds_status)
+        ]
+
+    def create_issue(self, *, title: str, description: str) -> _IssueRecord:
+        return _from_diamonds_issue(
+            self._client.create_issue(title=title, description=description),
+        )
+
+    def update_issue(self, issue_id: str, new_status: str) -> None:
+        diamonds_status = _to_diamonds_status(new_status)
+        update = DiamondsIssueUpdate(status=diamonds_status)
+        self._client.update_issue(issue_id, update)
+
+    def delete_issue(self, issue_id: str) -> None:
+        self._client.delete_issue(issue_id)
 
 
 class _TicketClientAdapter:
@@ -483,8 +667,22 @@ def _sanitize_bearer_token(token: str) -> str:
     return "".join(token.split())
 
 
-def _build_issue_client() -> _TicketClientAdapter | _RemoteJiraHttpClient:
-    """Build the Jira-first issue tracker client from environment settings."""
+def _build_issue_client() -> (
+    _DiamondsClientAdapter | _TicketClientAdapter | _RemoteJiraHttpClient
+):
+    """Build the cross-vertical issue tracker client.
+
+    Resolution order:
+    1. A registered Team Diamonds ``IssueTrackerClient`` factory (cross-vertical
+       integration via ``register_diamonds_client_factory``).
+    2. The Jira-shaped HTTP service if ``JIRA_SERVICE_BASE_URL`` and
+       ``JIRA_SERVICE_ACCESS_TOKEN`` are set.
+    3. The legacy Trello-style ``HttpTicketClient`` fallback.
+    """
+    diamonds_client = get_diamonds_client()
+    if diamonds_client is not None:
+        return _DiamondsClientAdapter(diamonds_client)
+
     jira_service_base_url = os.getenv("JIRA_SERVICE_BASE_URL")
     jira_service_access_token = os.getenv("JIRA_SERVICE_ACCESS_TOKEN")
 
@@ -495,7 +693,6 @@ def _build_issue_client() -> _TicketClientAdapter | _RemoteJiraHttpClient:
                 base_url=jira_service_base_url,
                 access_token=cleaned_token,
             )
-
 
     from http_ticket_client_impl.client import HttpTicketClient
 
@@ -616,6 +813,11 @@ def metrics() -> MetricsSnapshot:
     return _build_metrics_snapshot()
 
 
+def _escape_label(value: str) -> str:
+    """Escape a Prometheus label value per text exposition rules."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 @app.get("/metrics/prometheus")
 def metrics_prometheus() -> Response:
     """Expose telemetry in Prometheus text format for external scrapers."""
@@ -630,6 +832,12 @@ def metrics_prometheus() -> Response:
         "# HELP chat_requests_failed_total Failed HTTP requests.",
         "# TYPE chat_requests_failed_total counter",
         f"chat_requests_failed_total {snap.failed_requests}",
+        "# HELP chat_requests_domain_errors_total Requests that returned 4xx.",
+        "# TYPE chat_requests_domain_errors_total counter",
+        f"chat_requests_domain_errors_total {snap.domain_error_count}",
+        "# HELP chat_requests_infra_errors_total Requests that returned 5xx.",
+        "# TYPE chat_requests_infra_errors_total counter",
+        f"chat_requests_infra_errors_total {snap.infra_error_count}",
         "# HELP chat_success_rate Ratio of successful to total requests.",
         "# TYPE chat_success_rate gauge",
         f"chat_success_rate {snap.success_rate}",
@@ -639,8 +847,39 @@ def metrics_prometheus() -> Response:
         "# HELP chat_avg_latency_ms Average request latency in ms.",
         "# TYPE chat_avg_latency_ms gauge",
         f"chat_avg_latency_ms {snap.average_latency_ms}",
-        "",
+        "# HELP chat_requests_by_route_total Requests by route, method, status_class.",
+        "# TYPE chat_requests_by_route_total counter",
     ]
+
+    for entry in snap.by_route:
+        route = _escape_label(entry.route)
+        method = _escape_label(entry.method)
+        for status_class, count in (
+            ("ok", entry.ok_count),
+            ("domain_error", entry.domain_error_count),
+            ("infra_error", entry.infra_error_count),
+        ):
+            if count == 0:
+                continue
+            lines.append(
+                'chat_requests_by_route_total'
+                f'{{route="{route}",method="{method}",'
+                f'status_class="{status_class}"}} {count}',
+            )
+
+    lines.extend([
+        "# HELP chat_request_latency_ms_avg Avg request latency by route, method.",
+        "# TYPE chat_request_latency_ms_avg gauge",
+    ])
+    for entry in snap.by_route:
+        route = _escape_label(entry.route)
+        method = _escape_label(entry.method)
+        lines.append(
+            'chat_request_latency_ms_avg'
+            f'{{route="{route}",method="{method}"}} {entry.average_latency_ms}',
+        )
+
+    lines.append("")
     return Response(
         content="\n".join(lines),
         media_type="text/plain; version=0.0.4; charset=utf-8",

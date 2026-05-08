@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn>=0.42.0",
     "openai>=1.0.0",
     "httpx>=0.27.0",
+    "work-mgmt-client-interface",
 ]
 
 [dependency-groups]
@@ -35,6 +36,7 @@ members = [
 
 [tool.uv.sources]
 chat-client-api = { git = "https://github.com/HarshithKoriRaj/Shared-API" }
+work-mgmt-client-interface = { git = "https://github.com/shubham739/team-diamonds.git", branch = "HW-3", subdirectory = "components/work_mgmt_client_interface" }
 chat-client-adapter = { workspace = true }
 slack-client-impl = { workspace = true }
 chat-client-service = { workspace = true }
