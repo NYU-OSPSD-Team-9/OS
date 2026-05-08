@@ -1644,3 +1644,33 @@ def update_ticket_status(
 def create_app() -> FastAPI:
     """Return the configured FastAPI application."""
     return app
+
+
+# ---------------------------------------------------------------------------
+# Demo registration: in-memory calendar
+# ---------------------------------------------------------------------------
+
+
+def _maybe_register_demo_calendar() -> None:
+    """Auto-register an in-memory calendar when CALENDAR_DEMO_MODE is true.
+
+    Lets the deployed service exercise the cross-vertical schedule_event /
+    list_events / cancel_event AI tools for the demo video without
+    requiring real Outlook OAuth credentials. The flag is opt-in so
+    production deployments are not silently swapped onto a stub backend.
+
+    Uses a process-wide singleton so events scheduled by one /ai/chat call
+    are visible to subsequent list_events / cancel_event calls.
+    """
+    flag = os.getenv("CALENDAR_DEMO_MODE", "").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return
+    if get_calendar_client() is not None:
+        return
+    from ._demo_calendar import InMemoryCalendarClient
+
+    singleton = InMemoryCalendarClient()
+    register_calendar_client_factory(lambda: singleton)
+
+
+_maybe_register_demo_calendar()

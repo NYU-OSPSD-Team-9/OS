@@ -30,9 +30,10 @@ resource "render_web_service" "chat_client_service" {
   auto_deploy  = true
 
   env_vars = {
-    "SLACK_SCOPES"    = { value = var.slack_scopes }
-    "OPENAI_MODEL"    = { value = var.openai_model }
-    "ENV"             = { value = "production" }
+    "SLACK_SCOPES"       = { value = var.slack_scopes }
+    "OPENAI_MODEL"       = { value = var.openai_model }
+    "CALENDAR_DEMO_MODE" = { value = "true" }
+    "ENV"                = { value = "production" }
   }
 
   # Secrets must be set manually in the Render dashboard:

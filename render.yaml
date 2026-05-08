@@ -34,5 +34,7 @@ services:
         sync: false
       - key: TICKET_BOARD_ID
         sync: false
+      - key: CALENDAR_DEMO_MODE
+        value: "true"
       - key: ENV
         value: production
