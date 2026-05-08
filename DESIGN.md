@@ -162,10 +162,39 @@ via `pyproject.toml`:
 chat-client-api = { git = "https://github.com/HarshithKoriRaj/Shared-API" }
 ```
 
-Team 9's existing `SlackClient` was refactored to satisfy the agreed contract
-(see `docs/SHARED_API_MEMO.md` for the full memo and Team 9 adaptation plan).
-Breaking changes propagated to `chat_client_service`, `chat_client_adapter`,
-and all tests.
+### Team 9 adaptation plan
+
+Team 9's HW2 codebase had a custom `ChatClient` ABC and a Slack-shaped DTO
+that didn't match the agreed Chat-vertical contract. The plan to converge,
+in dependency order, was:
+
+1. **Replace the local `chat_client_api` package** with the shared one
+   pulled from the `Shared-API` git source. Drop our private copy entirely
+   so there is one source of truth for the ABC and DTOs.
+2. **Rename `channel` → `channel_id`** on every `ChatClient` method so the
+   parameter name matches the agreed contract. *Breaking change for every
+   call site.*
+3. **Drop our `SendMessageResponse` DTO**; have `send_message` return a
+   `Message` directly per the contract. *Breaking change in
+   `chat_client_service`'s `/messages` route, in the generated OpenAPI
+   client, in `chat_client_adapter`, and in every unit test that asserted
+   on the old shape.*
+4. **Update the `Channel` dataclass** to add `is_private: bool | None`
+   and `channel_type: str | None` (both optional so platforms that don't
+   model the concept can leave them `None`).
+5. **Make `SlackClient` raise `ValueError` on API errors** instead of
+   returning a failure object. *Breaking change for any caller that was
+   inspecting return values for failure; replaced by `try/except`.*
+6. **Update `chat_client_service` models and routes** so the FastAPI
+   responses serialise the new DTO shapes; regenerate
+   `chat_client_service_api_client` from the new OpenAPI spec.
+7. **Update `chat_client_adapter`** to map the regenerated client's
+   responses back to the new DTOs.
+8. **Update all unit / integration / E2E tests** to assert on the new
+   field names and exception-based error semantics.
+
+The full memo (purpose, agreed contract, unified credentials approach) is
+in `docs/SHARED_API_MEMO.md`.
 
 ## Key Design Decisions (HW3)
 
