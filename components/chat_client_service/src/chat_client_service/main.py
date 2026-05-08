@@ -9,11 +9,18 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
 import httpx
 from ai_client_api.client import AiTool, TokenUsage, get_ai_client
+from calendar_client_api import (
+    Client as CalendarClient,
+)
+from calendar_client_api import (
+    EventPatch as CalendarEventPatch,
+)
 from chat_client_api.client import ChatClient
 from fastapi import (
     Depends,
@@ -481,6 +488,145 @@ class _DiamondsClientAdapter:
 
     def delete_issue(self, issue_id: str) -> None:
         self._client.delete_issue(issue_id)
+
+
+# ---------------------------------------------------------------------------
+# Cross-vertical: Calendar (Team 12 — Outlook Calendar)
+# ---------------------------------------------------------------------------
+
+
+_calendar_client_factory: Callable[[], CalendarClient] | None = None
+
+
+def register_calendar_client_factory(
+    factory: Callable[[], CalendarClient] | None,
+) -> None:
+    """Register or clear the cross-vertical Calendar Client factory.
+
+    Mirrors the HW1 ``register_client`` pattern so a concrete calendar
+    implementation (Outlook, Google Calendar, etc.) can be injected without
+    coupling the chat service to any provider SDK.
+    """
+    global _calendar_client_factory  # noqa: PLW0603
+    _calendar_client_factory = factory
+
+
+def get_calendar_client() -> CalendarClient | None:
+    """Return the registered Calendar Client, or None if unset."""
+    if _calendar_client_factory is None:
+        return None
+    return _calendar_client_factory()
+
+
+@dataclass
+class _EventRecord:
+    """Internal normalised calendar event (provider-agnostic)."""
+
+    event_id: str
+    title: str
+    starts_at: str
+    ends_at: str
+    location: str | None
+    description: str | None
+
+
+def _from_calendar_event(event: Any) -> _EventRecord:
+    """Convert a Calendar ``Event`` ABC into the internal event record."""
+    return _EventRecord(
+        event_id=str(event.id),
+        title=str(event.title),
+        starts_at=event.starts_at.isoformat(),
+        ends_at=event.ends_at.isoformat(),
+        location=event.location,
+        description=event.description,
+    )
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    """Parse an ISO 8601 timestamp; assume UTC if no tz is supplied."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+class _CalendarClientAdapter:
+    """Adapt Team 12's ``calendar_client_api.Client`` to internal event shape."""
+
+    def __init__(self, client: CalendarClient) -> None:
+        self._client = client
+
+    def list_events(self, *, days: int = 7) -> list[_EventRecord]:
+        start = datetime.now(UTC)
+        end = start + timedelta(days=days)
+        return [
+            _from_calendar_event(event)
+            for event in self._client.list_events(start=start, end=end)
+        ]
+
+    def get_event(self, event_id: str) -> _EventRecord:
+        return _from_calendar_event(self._client.get_event(event_id))
+
+    def create_event(
+        self,
+        *,
+        title: str,
+        starts_at: str,
+        ends_at: str,
+        location: str | None = None,
+        description: str | None = None,
+    ) -> _EventRecord:
+        event = self._client.create_event(
+            title=title,
+            starts_at=_parse_iso_datetime(starts_at),
+            ends_at=_parse_iso_datetime(ends_at),
+            location=location,
+            description=description,
+        )
+        return _from_calendar_event(event)
+
+    def update_event(  # noqa: PLR0913
+        self,
+        event_id: str,
+        *,
+        title: str | None = None,
+        starts_at: str | None = None,
+        ends_at: str | None = None,
+        location: str | None = None,
+        description: str | None = None,
+    ) -> _EventRecord:
+        patch = CalendarEventPatch(
+            title=title,
+            starts_at=_parse_iso_datetime(starts_at) if starts_at else None,
+            ends_at=_parse_iso_datetime(ends_at) if ends_at else None,
+            location=location,
+            description=description,
+        )
+        return _from_calendar_event(self._client.update_event(event_id, patch))
+
+    def cancel_event(self, event_id: str) -> None:
+        self._client.delete_event(event_id)
+
+
+def _build_calendar_client() -> _CalendarClientAdapter:
+    """Resolve the registered Calendar client or fail with HTTP 503.
+
+    Returns the adapter wrapping a concrete ``calendar_client_api.Client``;
+    raises 503 if nothing is registered (cross-vertical dep not configured).
+    """
+    client = get_calendar_client()
+    if client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No calendar client registered.",
+        )
+    return _CalendarClientAdapter(client)
+
+
+def _cancel_event_tool(event_id: str) -> str:
+    """AI tool wrapper: cancel an event and return a JSON ack."""
+    _build_calendar_client().cancel_event(event_id)
+    return json.dumps({"event_id": event_id, "status": "cancelled"})
 
 
 class _TicketClientAdapter:
@@ -1281,6 +1427,80 @@ def ai_chat(
                 )
                 or "ok",
             }),
+        ),
+        AiTool(
+            name="list_events",
+            description=(
+                "List upcoming calendar events from the registered "
+                "calendar provider (Outlook / Google)."
+            ),
+            parameters={
+                "days": {
+                    "type": "integer",
+                    "description": (
+                        "Window size in days, starting from now (default 7)."
+                    ),
+                },
+            },
+            handler=lambda days=7: json.dumps([
+                {
+                    "event_id": e.event_id,
+                    "title": e.title,
+                    "starts_at": e.starts_at,
+                    "ends_at": e.ends_at,
+                    "location": e.location,
+                }
+                for e in _build_calendar_client().list_events(days=int(days))
+            ]),
+        ),
+        AiTool(
+            name="schedule_event",
+            description=(
+                "Schedule a new calendar event in the registered "
+                "calendar provider."
+            ),
+            parameters={
+                "title": {"type": "string", "description": "Event title."},
+                "starts_at": {
+                    "type": "string",
+                    "description": "ISO 8601 start datetime.",
+                },
+                "ends_at": {
+                    "type": "string",
+                    "description": "ISO 8601 end datetime.",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Optional location.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional event description / agenda.",
+                },
+            },
+            handler=lambda title, starts_at, ends_at,
+            location=None,
+            description=None: json.dumps({
+                "event_id": _build_calendar_client().create_event(
+                    title=title,
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                    location=location,
+                    description=description,
+                ).event_id,
+                "status": "scheduled",
+            }),
+        ),
+        AiTool(
+            name="cancel_event",
+            description="Cancel a calendar event by ID.",
+            parameters={
+                "event_id": {
+                    "type": "string",
+                    "description": "Event identifier returned by list_events.",
+                },
+            },
+            handler=_cancel_event_tool,
         ),
     ]
 
