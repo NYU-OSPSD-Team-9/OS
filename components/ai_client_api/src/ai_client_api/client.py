@@ -20,6 +20,22 @@ class AiTool:
     handler: Callable[..., str] | None = field(default=None, repr=False, compare=False)
 
 
+@dataclass
+class TokenUsage:
+    """Token consumption for a single AI call (or accumulated across rounds).
+
+    Implementations populate this after each ``send_message*`` call so that
+    consumers (telemetry middleware, billing dashboards) can track usage and
+    approximate cost without depending on a specific provider SDK.
+    """
+
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class AiClient(ABC):
     """Abstract base class for AI client implementations."""
 
@@ -62,6 +78,15 @@ class AiClient(ABC):
             AI-generated text response after tool execution
 
         """
+
+    def get_last_usage(self) -> TokenUsage | None:
+        """Return token usage for the most recent call, or None if unavailable.
+
+        Implementations that talk to a provider exposing usage data (OpenAI,
+        Anthropic, Gemini) should populate this; pure stubs may return None.
+        Default implementation returns None so existing tests need no change.
+        """
+        return None
 
 
 class _AiClientRegistry:

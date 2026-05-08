@@ -6,6 +6,7 @@ description = "HTTP adapter that calls an issue tracker team's REST service"
 dependencies = [
     "httpx>=0.27.0",
     "ticket-client-api",
+    "tenacity>=8.0.0",
 ]
 
 [build-system]

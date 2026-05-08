@@ -113,7 +113,7 @@ class FakeGateway:
         """Return a deterministic single message."""
         del session_id
         parts = message_id.split(":", 1)
-        channel = parts[0] if len(parts) == 2 else "C001"  # noqa: PLR2004
+        channel = parts[0] if len(parts) == 2 else "C001"
         return Message(
             message_id=message_id,
             channel=channel,

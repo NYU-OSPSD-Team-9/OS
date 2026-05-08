@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from urllib.parse import urlencode
 
 import httpx
-from ai_client_api.client import AiTool, get_ai_client
+from ai_client_api.client import AiTool, TokenUsage, get_ai_client
 from chat_client_api.client import ChatClient
 from fastapi import (
     Depends,
@@ -39,6 +39,7 @@ from work_mgmt_client_interface import (
 from .models import (
     AiChatRequest,
     AiChatResponse,
+    AiUsageMetrics,
     AuthCallbackResponse,
     AuthSessionResponse,
     AuthSessionStatusResponse,
@@ -100,6 +101,15 @@ _metrics: dict[str, float] = {
     "domain_errors": 0,
     "infra_errors": 0,
     "total_latency_ms": 0,
+}
+
+_ai_metrics_lock = threading.Lock()
+_ai_metrics: dict[str, float] = {
+    "ai_calls_total": 0,
+    "ai_prompt_tokens_total": 0,
+    "ai_completion_tokens_total": 0,
+    "ai_total_tokens_total": 0,
+    "ai_estimated_cost_usd_total": 0.0,
 }
 
 _HTTP_CLIENT_ERROR_FLOOR = 400
@@ -198,6 +208,26 @@ def reset_service_state() -> None:
     _labeled_counts.clear()
     _labeled_latency_sum.clear()
     _labeled_latency_count.clear()
+    for ai_key in _ai_metrics:
+        _ai_metrics[ai_key] = 0
+
+
+def _record_ai_usage(usage: TokenUsage | None) -> None:
+    """Add a TokenUsage measurement to the aggregate AI counters.
+
+    Called after every /ai/chat completion. Safe to pass ``None`` (skipped).
+    """
+    if usage is None:
+        return
+    with _ai_metrics_lock:
+        _ai_metrics["ai_calls_total"] += 1
+        _ai_metrics["ai_prompt_tokens_total"] += usage.prompt_tokens
+        _ai_metrics["ai_completion_tokens_total"] += usage.completion_tokens
+        _ai_metrics["ai_total_tokens_total"] += usage.total_tokens
+        _ai_metrics["ai_estimated_cost_usd_total"] = round(
+            _ai_metrics["ai_estimated_cost_usd_total"] + usage.estimated_cost_usd,
+            6,
+        )
 
 
 def _build_login_url(settings: ServiceSettings, session_id: str) -> str:
@@ -332,6 +362,17 @@ def _build_metrics_snapshot() -> MetricsSnapshot:
             ),
         )
 
+    with _ai_metrics_lock:
+        ai_usage = AiUsageMetrics(
+            calls_total=int(_ai_metrics["ai_calls_total"]),
+            prompt_tokens_total=int(_ai_metrics["ai_prompt_tokens_total"]),
+            completion_tokens_total=int(_ai_metrics["ai_completion_tokens_total"]),
+            total_tokens_total=int(_ai_metrics["ai_total_tokens_total"]),
+            estimated_cost_usd_total=round(
+                _ai_metrics["ai_estimated_cost_usd_total"], 6,
+            ),
+        )
+
     return MetricsSnapshot(
         total_requests=int(total),
         successful_requests=int(success),
@@ -342,6 +383,7 @@ def _build_metrics_snapshot() -> MetricsSnapshot:
         failure_rate=round(failed / total, 4) if total > 0 else 0.0,
         average_latency_ms=round(avg_latency, 2),
         by_route=by_route,
+        ai_usage=ai_usage,
     )
 
 
@@ -879,6 +921,25 @@ def metrics_prometheus() -> Response:
             f'{{route="{route}",method="{method}"}} {entry.average_latency_ms}',
         )
 
+    ai = snap.ai_usage
+    lines.extend([
+        "# HELP chat_ai_calls_total Total AI provider calls completed.",
+        "# TYPE chat_ai_calls_total counter",
+        f"chat_ai_calls_total {ai.calls_total}",
+        "# HELP chat_ai_prompt_tokens_total Cumulative prompt tokens consumed.",
+        "# TYPE chat_ai_prompt_tokens_total counter",
+        f"chat_ai_prompt_tokens_total {ai.prompt_tokens_total}",
+        "# HELP chat_ai_completion_tokens_total Cumulative completion tokens consumed.",
+        "# TYPE chat_ai_completion_tokens_total counter",
+        f"chat_ai_completion_tokens_total {ai.completion_tokens_total}",
+        "# HELP chat_ai_total_tokens_total Cumulative total tokens consumed.",
+        "# TYPE chat_ai_total_tokens_total counter",
+        f"chat_ai_total_tokens_total {ai.total_tokens_total}",
+        "# HELP chat_ai_estimated_cost_usd_total Approximate USD cost of AI calls.",
+        "# TYPE chat_ai_estimated_cost_usd_total counter",
+        f"chat_ai_estimated_cost_usd_total {ai.estimated_cost_usd_total}",
+    ])
+
     lines.append("")
     return Response(
         content="\n".join(lines),
@@ -1239,6 +1300,7 @@ def ai_chat(
             detail=str(exc),
         ) from exc
 
+    _record_ai_usage(ai.get_last_usage())
     return AiChatResponse(reply=reply)
 
 

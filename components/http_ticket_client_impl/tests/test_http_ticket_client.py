@@ -137,6 +137,7 @@ def test_update_ticket_status_success() -> None:
 
     mock_post.assert_called_once_with(
         f"http://tickets.local/boards/{BOARD}/issues/1/close",
+        json=None,
         timeout=15.0,
     )
 
@@ -148,3 +149,71 @@ def test_update_ticket_status_failure_raises() -> None:
     with mock.patch("httpx.post", return_value=fake_resp):
         with pytest.raises(ValueError, match="Failed to update ticket"):
             client.update_ticket_status("1", "closed")
+
+
+# ---------------------------------------------------------------------------
+# Resilience: tenacity retry around HTTP transients (extra credit)
+# ---------------------------------------------------------------------------
+
+
+def _server_error_response() -> mock.MagicMock:
+    """Return a fake httpx response that raises a 5xx HTTPStatusError."""
+    resp = mock.MagicMock()
+    resp.status_code = 503
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "service unavailable", request=mock.MagicMock(), response=resp,
+    )
+    return resp
+
+
+def test_get_tickets_retries_transient_5xx_then_succeeds() -> None:
+    """Two 5xx responses should retry; the third 200 wins."""
+    client = HttpTicketClient("http://tickets.local", board_id=BOARD)
+
+    success = _make_response(
+        json_data=[{"id": 7, "title": "Recovered", "state": "open", "body": "x"}],
+    )
+    fake_get = mock.Mock(
+        side_effect=[
+            _server_error_response(),
+            _server_error_response(),
+            success,
+        ],
+    )
+    with mock.patch("httpx.get", fake_get):
+        tickets = client.get_tickets(status="open")
+
+    assert len(tickets) == 1
+    assert tickets[0].ticket_id == "7"
+    assert fake_get.call_count == 3
+
+
+def test_get_tickets_does_not_retry_4xx() -> None:
+    """A 404 should fail immediately — retrying caller mistakes is wasteful."""
+    client = HttpTicketClient("http://tickets.local", board_id=BOARD)
+
+    not_found = mock.MagicMock()
+    not_found.status_code = 404
+    not_found.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "not found", request=mock.MagicMock(), response=not_found,
+    )
+    fake_get = mock.Mock(return_value=not_found)
+    with mock.patch("httpx.get", fake_get):
+        with pytest.raises(ValueError, match="Failed to fetch tickets"):
+            client.get_tickets()
+    assert fake_get.call_count == 1
+
+
+def test_create_ticket_retries_connect_errors() -> None:
+    """ConnectError is a transient network failure; should retry."""
+    client = HttpTicketClient("http://tickets.local", board_id=BOARD)
+    success = _make_response(
+        json_data={"id": 9, "title": "T", "state": "open", "body": ""},
+    )
+    fake_post = mock.Mock(
+        side_effect=[httpx.ConnectError("boom"), success],
+    )
+    with mock.patch("httpx.post", fake_post):
+        ticket = client.create_ticket("T", "")
+    assert ticket.ticket_id == "9"
+    assert fake_post.call_count == 2

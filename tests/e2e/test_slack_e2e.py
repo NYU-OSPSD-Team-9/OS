@@ -46,7 +46,7 @@ class TestLiveServiceEndpoints:
         """Auth session create, read, and delete lifecycle completes without errors."""
         # Skip when the live service is unavailable (e.g. pending redeploy)
         health = httpx.get(f"{LIVE_SERVICE_URL}/health", timeout=30)
-        if health.status_code >= 500:  # noqa: PLR2004
+        if health.status_code >= 500:
             msg = f"Live service unhealthy ({health.status_code}) — skipping"
             pytest.skip(msg)
 

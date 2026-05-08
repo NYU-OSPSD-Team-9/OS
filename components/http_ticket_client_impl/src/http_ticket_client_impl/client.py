@@ -3,12 +3,57 @@
 Calls Team 3 (ospsd-team-03) via their REST API at
 ``/boards/{board}/issues`` and maps their response schema to the
 shared ``Ticket`` data class used by the ticket_client_api contract.
+
+Transient connection / 5xx errors are retried with exponential backoff via
+tenacity. Domain (4xx) responses are NOT retried — those signal a caller
+error that another attempt cannot fix.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 from ticket_client_api.client import Ticket, TicketClient
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+_MAX_RETRY_ATTEMPTS = 3
+_RETRY_INITIAL_WAIT_SECONDS = 0.5
+_RETRY_MAX_WAIT_SECONDS = 4
+_HTTP_SERVER_ERROR_FLOOR = 500
+
+
+def _is_transient_http_error(exc: BaseException) -> bool:
+    """Return True if the error is worth retrying.
+
+    Connection / read / write / timeout errors are always transient. HTTP
+    status errors are transient only when the response is 5xx — 4xx means
+    the caller is wrong and retrying will not help.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= _HTTP_SERVER_ERROR_FLOOR
+    return isinstance(exc, httpx.HTTPError)
+
+
+def _with_retries(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a function with retry-on-transient-HTTP-error and exponential backoff."""
+    return retry(
+        reraise=True,
+        stop=stop_after_attempt(_MAX_RETRY_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=_RETRY_INITIAL_WAIT_SECONDS,
+            max=_RETRY_MAX_WAIT_SECONDS,
+        ),
+        retry=retry_if_exception(_is_transient_http_error),
+    )(func)
 
 
 def _ticket_from_issue(data: dict[str, object]) -> Ticket:
@@ -40,6 +85,23 @@ class HttpTicketClient(TicketClient):
         self._base_url = base_url.rstrip("/")
         self._board_id = board_id
 
+    @_with_retries
+    def _get(self, url: str) -> httpx.Response:
+        response = httpx.get(url, timeout=15.0)
+        response.raise_for_status()
+        return response
+
+    @_with_retries
+    def _post(
+        self,
+        url: str,
+        *,
+        json: dict[str, object] | None = None,
+    ) -> httpx.Response:
+        response = httpx.post(url, json=json, timeout=15.0)
+        response.raise_for_status()
+        return response
+
     def get_tickets(self, status: str = "open") -> list[Ticket]:
         """Fetch issues from the board, optionally filtered by state.
 
@@ -54,11 +116,9 @@ class HttpTicketClient(TicketClient):
 
         """
         try:
-            response = httpx.get(
+            response = self._get(
                 f"{self._base_url}/boards/{self._board_id}/issues",
-                timeout=15.0,
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
             msg = f"Failed to fetch tickets: {exc}"
             raise ValueError(msg) from exc
@@ -83,12 +143,9 @@ class HttpTicketClient(TicketClient):
 
         """
         try:
-            response = httpx.get(
-                f"{self._base_url}/boards/{self._board_id}"
-                f"/issues/{ticket_id}",
-                timeout=15.0,
+            response = self._get(
+                f"{self._base_url}/boards/{self._board_id}/issues/{ticket_id}",
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
             msg = f"Ticket not found: {ticket_id}"
             raise ValueError(msg) from exc
@@ -109,12 +166,10 @@ class HttpTicketClient(TicketClient):
 
         """
         try:
-            response = httpx.post(
+            response = self._post(
                 f"{self._base_url}/boards/{self._board_id}/issues",
                 json={"title": title, "body": description},
-                timeout=15.0,
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
             msg = f"Failed to create ticket: {exc}"
             raise ValueError(msg) from exc
@@ -142,12 +197,10 @@ class HttpTicketClient(TicketClient):
             )
             raise ValueError(msg)
         try:
-            response = httpx.post(
+            self._post(
                 f"{self._base_url}/boards/{self._board_id}"
                 f"/issues/{ticket_id}/close",
-                timeout=15.0,
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
             msg = f"Failed to update ticket {ticket_id}: {exc}"
             raise ValueError(msg) from exc

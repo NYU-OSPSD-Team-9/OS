@@ -246,6 +246,16 @@ class RouteMetricsEntry(BaseModel):
     average_latency_ms: float
 
 
+class AiUsageMetrics(BaseModel):
+    """Aggregate AI provider usage metrics."""
+
+    calls_total: int = 0
+    prompt_tokens_total: int = 0
+    completion_tokens_total: int = 0
+    total_tokens_total: int = 0
+    estimated_cost_usd_total: float = 0.0
+
+
 class MetricsSnapshot(BaseModel):
     """Current telemetry snapshot."""
 
@@ -258,6 +268,7 @@ class MetricsSnapshot(BaseModel):
     failure_rate: float
     average_latency_ms: float
     by_route: list[RouteMetricsEntry] = []
+    ai_usage: AiUsageMetrics = AiUsageMetrics()
 
 
 class AiChatRequest(BaseModel):

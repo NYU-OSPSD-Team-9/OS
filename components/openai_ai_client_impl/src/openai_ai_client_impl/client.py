@@ -3,15 +3,61 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
-from ai_client_api.client import AiClient, AiTool, register_ai_client
-from openai import OpenAI
+from ai_client_api.client import AiClient, AiTool, TokenUsage, register_ai_client
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 _DEFAULT_MAX_TOKENS = 1024
 _MAX_TOOL_ROUNDS = 5
+_MAX_RETRY_ATTEMPTS = 3
+_RETRY_INITIAL_WAIT_SECONDS = 0.5
+_RETRY_MAX_WAIT_SECONDS = 4
+
+logger = logging.getLogger(__name__)
+
+# Approximate USD per-1k-token rates for OpenAI models. Off-list models fall
+# through to the gpt-4o-mini defaults so tracking does not silently zero out.
+_PRICE_PER_1K_TOKENS_USD: dict[str, dict[str, float]] = {
+    "gpt-4o-mini": {"prompt": 0.00015, "completion": 0.00060},
+    "gpt-4o": {"prompt": 0.00500, "completion": 0.01500},
+    "gpt-4-turbo": {"prompt": 0.01000, "completion": 0.03000},
+    "gpt-3.5-turbo": {"prompt": 0.00050, "completion": 0.00150},
+}
+
+_RETRYABLE_OPENAI_ERRORS: tuple[type[Exception], ...] = (
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    InternalServerError,
+)
+
+
+def _log_retry(state: RetryCallState) -> None:
+    """Log each retry attempt so failures show up in service logs."""
+    err = state.outcome.exception() if state.outcome else None
+    logger.warning(
+        "OpenAI call retry %s/%s after error: %s",
+        state.attempt_number,
+        _MAX_RETRY_ATTEMPTS,
+        err,
+    )
 
 
 def _ai_tool_to_openai(tool: AiTool) -> dict[str, Any]:
@@ -28,6 +74,23 @@ def _ai_tool_to_openai(tool: AiTool) -> dict[str, Any]:
             },
         },
     }
+
+
+def _estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Estimate USD cost for a call given token counts.
+
+    Falls back to the gpt-4o-mini rate for unknown models so dashboards do
+    not silently zero out when a new model is configured.
+    """
+    rates = _PRICE_PER_1K_TOKENS_USD.get(
+        model,
+        _PRICE_PER_1K_TOKENS_USD["gpt-4o-mini"],
+    )
+    return round(
+        (prompt_tokens / 1000.0) * rates["prompt"]
+        + (completion_tokens / 1000.0) * rates["completion"],
+        6,
+    )
 
 
 class OpenAiClient(AiClient):
@@ -50,6 +113,70 @@ class OpenAiClient(AiClient):
         self._client = OpenAI(api_key=api_key)
         self._model = model
         self._max_tokens = max_tokens
+        self._last_usage: TokenUsage | None = None
+
+    def get_last_usage(self) -> TokenUsage | None:
+        """Return token usage captured during the most recent call."""
+        return self._last_usage
+
+    def _create_completion(self, **kwargs: Any) -> Any:
+        """Call OpenAI with retry on transient errors.
+
+        Wrapped via tenacity so rate-limit / timeout / connection / 5xx errors
+        are retried with exponential backoff (up to ``_MAX_RETRY_ATTEMPTS``).
+        """
+        retrying = retry(
+            reraise=True,
+            stop=stop_after_attempt(_MAX_RETRY_ATTEMPTS),
+            wait=wait_exponential(
+                multiplier=_RETRY_INITIAL_WAIT_SECONDS,
+                max=_RETRY_MAX_WAIT_SECONDS,
+            ),
+            retry=retry_if_exception_type(_RETRYABLE_OPENAI_ERRORS),
+            before_sleep=_log_retry,
+        )
+
+        @retrying
+        def _do_call() -> Any:
+            return self._client.chat.completions.create(**kwargs)
+
+        return _do_call()
+
+    def _record_usage(self, response: Any, *, accumulate: bool) -> None:
+        """Update ``_last_usage`` from an OpenAI response.
+
+        Args:
+            response: OpenAI ``ChatCompletion`` response object.
+            accumulate: When True, sum onto the existing usage (used by the
+                tool-calling loop, which makes multiple round-trips).
+
+        """
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
+        cost = _estimate_cost_usd(self._model, prompt, completion)
+
+        if accumulate and self._last_usage is not None:
+            self._last_usage = TokenUsage(
+                model=self._model,
+                prompt_tokens=self._last_usage.prompt_tokens + prompt,
+                completion_tokens=self._last_usage.completion_tokens + completion,
+                total_tokens=self._last_usage.total_tokens + total,
+                estimated_cost_usd=round(
+                    self._last_usage.estimated_cost_usd + cost, 6,
+                ),
+            )
+        else:
+            self._last_usage = TokenUsage(
+                model=self._model,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=total,
+                estimated_cost_usd=cost,
+            )
 
     def send_message(
         self,
@@ -66,8 +193,9 @@ class OpenAiClient(AiClient):
             Model text response.
 
         """
+        self._last_usage = None
         system = self._build_system_prompt(context)
-        response = self._client.chat.completions.create(
+        response = self._create_completion(
             model=self._model,
             max_tokens=self._max_tokens,
             messages=[
@@ -75,6 +203,7 @@ class OpenAiClient(AiClient):
                 {"role": "user", "content": prompt},
             ],
         )
+        self._record_usage(response, accumulate=False)
         return response.choices[0].message.content or ""
 
     def send_message_with_tools(
@@ -94,6 +223,7 @@ class OpenAiClient(AiClient):
             Final text response after all tool calls are resolved.
 
         """
+        self._last_usage = None
         system = self._build_system_prompt(context)
         openai_tools = [_ai_tool_to_openai(t) for t in tools]
         tool_map = {t.name: t for t in tools}
@@ -104,12 +234,13 @@ class OpenAiClient(AiClient):
 
         tool_rounds = 0
         while tool_rounds < _MAX_TOOL_ROUNDS:
-            response = self._client.chat.completions.create(
+            response = self._create_completion(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                tools=openai_tools,  # type: ignore[arg-type]
-                messages=messages,  # type: ignore[arg-type]
+                tools=openai_tools,
+                messages=messages,
             )
+            self._record_usage(response, accumulate=True)
             choice = response.choices[0]
 
             if choice.finish_reason == "stop":

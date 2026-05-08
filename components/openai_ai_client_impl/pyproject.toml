@@ -6,6 +6,7 @@ description = "OpenAI implementation of ai-client-api"
 dependencies = [
     "ai-client-api",
     "openai>=1.0.0",
+    "tenacity>=8.0.0",
 ]
 
 [build-system]

@@ -59,7 +59,7 @@ class MockClient(ChatClient):
     def get_message(self, message_id: str) -> Message:
         """Get a mock message."""
         parts = message_id.split(":", 1)
-        channel = parts[0] if len(parts) == 2 else "C123"  # noqa: PLR2004
+        channel = parts[0] if len(parts) == 2 else "C123"
         return Message(
             message_id=message_id,
             channel=channel,

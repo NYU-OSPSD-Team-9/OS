@@ -129,6 +129,75 @@ def test_prometheus_exposes_labeled_series() -> None:
     assert "chat_requests_infra_errors_total" in body
 
 
+def test_metrics_records_ai_token_usage() -> None:
+    """_record_ai_usage should accumulate token + cost into the snapshot."""
+    from ai_client_api.client import TokenUsage
+    from chat_client_service.main import _record_ai_usage
+
+    _record_ai_usage(
+        TokenUsage(
+            model="gpt-4o-mini",
+            prompt_tokens=120,
+            completion_tokens=30,
+            total_tokens=150,
+            estimated_cost_usd=0.000234,
+        ),
+    )
+    _record_ai_usage(
+        TokenUsage(
+            model="gpt-4o-mini",
+            prompt_tokens=80,
+            completion_tokens=20,
+            total_tokens=100,
+            estimated_cost_usd=0.000156,
+        ),
+    )
+
+    response = client.get("/metrics")
+    ai_usage = response.json()["ai_usage"]
+    assert ai_usage["calls_total"] == 2
+    assert ai_usage["prompt_tokens_total"] == 200
+    assert ai_usage["completion_tokens_total"] == 50
+    assert ai_usage["total_tokens_total"] == 250
+    assert ai_usage["estimated_cost_usd_total"] > 0
+
+
+def test_prometheus_exposes_ai_usage_metrics() -> None:
+    """Prometheus output should include AI token + cost counters."""
+    from ai_client_api.client import TokenUsage
+    from chat_client_service.main import _record_ai_usage
+
+    _record_ai_usage(
+        TokenUsage(
+            model="gpt-4o-mini",
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+            estimated_cost_usd=0.0001,
+        ),
+    )
+    body = client.get("/metrics/prometheus").text
+    assert "chat_ai_calls_total" in body
+    assert "chat_ai_prompt_tokens_total" in body
+    assert "chat_ai_completion_tokens_total" in body
+    assert "chat_ai_total_tokens_total" in body
+    assert "chat_ai_estimated_cost_usd_total" in body
+
+
+def test_record_ai_usage_with_none_is_noop() -> None:
+    """_record_ai_usage should silently ignore None (no provider data)."""
+    from chat_client_service.main import _record_ai_usage
+
+    response = client.get("/metrics")
+    before = response.json()["ai_usage"]["calls_total"]
+
+    _record_ai_usage(None)
+
+    response = client.get("/metrics")
+    after = response.json()["ai_usage"]["calls_total"]
+    assert after == before
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
