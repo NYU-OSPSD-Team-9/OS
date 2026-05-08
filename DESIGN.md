@@ -1,159 +1,213 @@
-# Design Document — HW2
+# Design Document — HW3
 
-## Overview
+HW3 layers three new capabilities onto the HW2 chat-vertical foundation:
 
-This project exposes a single `ChatClient` interface while supporting two execution
-modes transparently:
+1. **AI client integration** — a provider-agnostic `AiClient` ABC plus an OpenAI
+   implementation that supports tool calling against domain actions.
+2. **Cross-vertical issue-tracker integration** — the service consumes the issue
+   tracker vertical's `TicketClient` contract via dependency injection, with two
+   swappable implementations (Jira-style HTTP service and legacy Trello-style
+   service).
+3. **Observability** — request-level telemetry middleware emits per-route /
+   per-method / per-status counters and latency, exposed via JSON, Prometheus,
+   and a live HTML dashboard.
 
-- **Local mode**: `slack_client_impl` calls Slack directly using a bot token.
-- **Remote mode**: `chat_client_adapter` proxies calls over HTTP to a deployed
-  `chat_client_service`, which in turn uses `slack_client_impl`.
+The HW2 architecture (Chat ABC, Slack implementation, FastAPI service, generated
+client, remote adapter) is preserved unchanged; HW3 components plug in alongside
+it.
 
-The consumer's code does not change between modes — only the injected implementation
-differs.
+## HW3 Components
 
-```
-Consumer Code
-     │
-     ▼ get_client()
-┌────────────────────────────────────────────────┐
-│                  ChatClient ABC                │
-└──────────────┬─────────────────────────────────┘
-               │                │
-        Local Mode         Remote Mode
-               │                │
-      SlackClient        ChatClientServiceAdapter
-               │                │
-          Slack API      chat_client_service_api_client
-                                │
-                          FastAPI Service
-                                │
-                          SlackClient
-                                │
-                           Slack API
-```
+### `ai_client_api`
+Pure-Python abstract interface (`AiClient` ABC) with two methods:
 
-## Component Responsibilities
+- `send_message(prompt, context)` — basic completion.
+- `send_message_with_tools(prompt, tools, context)` — completion with typed
+  `AiTool` definitions. Each `AiTool` carries `name`, `description`, JSON-schema
+  `parameters`, and an optional Python `handler` callable.
 
-### 1. `chat_client_api`
-Defines the stable abstract contract (`ChatClient` ABC) and shared DTOs (`Channel`,
-`Message`, `SendMessageResponse`). Has zero external dependencies — any consumer can
-depend on it without pulling in Slack or HTTP libraries. Also hosts the
-`_ClientRegistry` / `get_client()` / `register_client()` dependency-injection
-helpers.
+The package has zero external dependencies (no provider SDKs, no HTTP libraries)
+and exposes a `register_ai_client()` / `get_ai_client()` factory mirroring the
+`get_client()` pattern from HW1.
 
-### 2. `slack_client_impl`
-Wraps the Slack Web API via `slack-sdk`. Implements all three `ChatClient` methods.
-Self-registers via `register_client()` on module import, so importing the package is
-sufficient to activate the local backend. Reads `SLACK_BOT_TOKEN` from the
-environment for direct use.
+### `openai_ai_client_impl`
+Concrete `OpenAiClient(AiClient)` backed by the OpenAI Python SDK. Tool
+definitions are translated into the OpenAI function-calling schema; the
+implementation drives a tool-call loop (capped at 5 rounds) that executes
+registered handlers, feeds results back into the model, and returns the final
+text. Importing the package self-registers it via `register_ai_client()`. The
+API key is read from `OPENAI_API_KEY` only — never hardcoded, never committed.
 
-### 3. `chat_client_service`
-A FastAPI deployment unit. Exposes the `ChatClient` contract over HTTP and adds an
-OAuth 2.0 session layer so multiple users can authenticate independently without
-sharing a single bot token. Internally delegates to `slack_client_impl` per session.
-The service is implementation-agnostic — it depends on `ChatClient`, not `SlackClient`
-directly.
+### `ticket_client_api`
+Issue-tracker vertical's shared ABC: a `TicketClient` with `get_tickets`,
+`get_ticket`, `create_ticket`, `update_ticket_status`, and a normalized
+`Ticket` dataclass. Provider-agnostic: no Jira / Trello / Linear types leak.
 
-### 4. `chat_client_service_api_client`
-Auto-generated from the service's `/openapi.json` using `openapi-python-client`.
-Provides typed Python bindings for every service endpoint. Excluded from handwritten
-linting, type-checking, and coverage rules.
+### `http_ticket_client_impl`
+Implements `TicketClient` over HTTP using `httpx`. Suitable for any tracker that
+exposes a REST contract matching the shared schema.
 
-### 5. `chat_client_adapter`
-Implements `ChatClient` by delegating to the generated API client. Handles the OAuth
-bootstrap flow (browser redirect + polling) and maps service responses back to core
-DTOs. Self-registers via `register_client()` on import, so importing the package is
-sufficient to activate the remote backend.
+## Cross-Vertical Integration
 
-## API Endpoints
+The chat service consumes the issue-tracker vertical's published interface
+(`work_mgmt_client_interface`, owned by Team Diamonds) as a `pyproject.toml`
+git dependency:
 
-| Method | Path | Auth Required | Description |
-|--------|------|---------------|-------------|
-| GET | `/health` | No | Liveness check — returns `{"status": "ok"}` |
-| POST | `/auth/sessions` | No | Create a new pending auth session |
-| GET | `/auth/login` | No | Redirect browser to Slack OAuth consent page |
-| GET | `/auth/callback` | No | Receive Slack code, exchange for token, store in session |
-| GET | `/auth/sessions/{session_id}` | No | Poll session authentication status |
-| DELETE | `/auth/sessions/{session_id}` | No | Delete session and revoke stored credentials |
-| GET | `/channels` | Yes (`X-Session-ID`) | List Slack channels |
-| POST | `/messages` | Yes (`X-Session-ID`) | Send a message to a channel |
-| GET | `/messages` | Yes (`X-Session-ID`) | Retrieve messages from a channel |
+```toml
+[project]
+dependencies = [..., "work-mgmt-client-interface"]
 
-## OAuth 2.0 Authorization Code Flow
-
-```
-Adapter                 Service               Slack
-  │                        │                    │
-  │  POST /auth/sessions   │                    │
-  │───────────────────────>│                    │
-  │  {session_id, login_url}                    │
-  │<───────────────────────│                    │
-  │                        │                    │
-  │  [opens login_url in browser]               │
-  │  GET /auth/login?session_id=...             │
-  │───────────────────────>│                    │
-  │  302 → Slack OAuth URL │                    │
-  │<───────────────────────│                    │
-  │                        │  User authorizes   │
-  │                        │<──────────────────>│
-  │                        │  GET /auth/callback?code=...&state=...
-  │                        │<───────────────────│
-  │                        │  POST oauth.v2.access
-  │                        │───────────────────>│
-  │                        │  {access_token}    │
-  │                        │<───────────────────│
-  │                        │  stores token in session
-  │                        │                    │
-  │  GET /auth/sessions/{id}                    │
-  │───────────────────────>│                    │
-  │  {authenticated: true} │                    │
-  │<───────────────────────│                    │
+[tool.uv.sources]
+work-mgmt-client-interface = { git = "https://github.com/shubham739/team-diamonds.git", branch = "HW-3", subdirectory = "components/work_mgmt_client_interface" }
 ```
 
-## Key Design Decisions
+The dependency is **not vendored** — `uv sync` resolves it directly from the
+Diamonds repo. A concrete `IssueTrackerClient` is injected via the
+`register_diamonds_client_factory()` DI hook (mirroring the HW1
+`register_client()` / `get_client()` pattern); swapping between providers
+(Diamonds → legacy Trello → Jira HTTP) is transparent to AI tools and HTTP
+endpoints.
 
-### OAuth state is managed by the service, not the adapter
-The CSRF state token is generated and validated entirely inside `chat_client_service`.
-The adapter only starts the flow and polls for completion. This keeps the adapter thin
-and ensures credentials never cross the HTTP boundary.
+At runtime, `_build_issue_client()` resolves the active client in this order:
 
-### In-memory session store
-Sessions are stored in `InMemoryAuthSessionStore` (a plain Python dict keyed by
-random URL-safe tokens). This is appropriate for the homework scope: simple,
-dependency-free, and easy to test. The known limitation is that sessions are lost on
-process restart — see Tradeoffs.
+```
+                  ┌─────────────────────┐
+   /issues/*   ─▶ │ _build_issue_client │
+   /ai/chat    ─▶ │   (resolution       │
+                  │    order)           │
+                  └────────┬────────────┘
+                           │
+       ┌───────────────────┼─────────────────────┐
+       ▼                   ▼                     ▼
+ _DiamondsClientAdapter  Jira HTTP        HttpTicketClient (legacy)
+ (work_mgmt_client_       (JIRA_SERVICE_   (TICKET_SERVICE_BASE_URL +
+  interface, injected)     BASE_URL +       TICKET_BOARD_ID)
+                           JIRA_SERVICE_
+                           ACCESS_TOKEN)
+```
 
-### Models separated into `models.py`
-All Pydantic request/response models, domain dataclasses, and session-management logic
-live in `models.py`. `main.py` contains only FastAPI app setup and endpoint handlers.
-This separation keeps each file focused and makes the codebase easier to navigate.
+All three branches conform to the same internal adapter shape so AI tools and
+HTTP route handlers do not branch. Swapping providers is a configuration /
+DI change, not a code change.
 
-### Service decoupled from concrete implementation via DI
-`main.py` does not import `SlackClient` at the module level. Instead it holds a
-`TokenClientFactory` callable (defaulting to a lazy `SlackClient` import) that is
-used by `build_chat_client`. Tests can replace `_client_factory` to inject any
-`ChatClient` implementation without touching the real Slack SDK.
+## AI Integration Flow
 
-### Generated client is excluded from quality gates
-`chat_client_service_api_client` is auto-generated from the OpenAPI spec. Hand-editing
-generated code defeats the purpose of generation, so it is excluded from `ruff`,
-`mypy`, and coverage enforcement in `pyproject.toml`.
+```
+User → POST /ai/chat {prompt}
+        │
+        ▼
+  ai_chat handler
+        │ build tools list (chat + issue)
+        ▼
+  AiClient.send_message_with_tools
+        │   ▲
+        ▼   │ tool result
+  OpenAiClient (function-calling loop)
+        │   │
+        ▼   │
+  Tool dispatch → handler(...)
+        │
+        ├── chat handlers → ChatClient (Slack)
+        └── issue handlers → _build_issue_client() → TicketClient
+                                                     │
+                                                     └── HTTP → external tracker
+```
 
-### Lazy authentication in the adapter
-`ChatClientServiceAdapter` stores the session ID internally after a successful OAuth
-flow. The first call to any `ChatClient` method will trigger authentication
-automatically if no session exists. The authenticated session ID is also persisted to
-`CHAT_CLIENT_SERVICE_SESSION_ID` so that the global factory (`_create_service_adapter`)
-can reconstruct an equivalent adapter from environment variables across process
-boundaries.
+The chat handler binds `ChatClient` per request via the existing session DI;
+the issue handlers resolve the `TicketClient` lazily from environment so the
+cross-vertical dependency stays provider-agnostic.
+
+## Observability Strategy
+
+### Middleware
+A FastAPI HTTP middleware records, per request, both aggregate counters and
+labeled per-`(route_template, method, status_class)` counters and latency. Three
+status classes are tracked separately:
+
+- `ok` — HTTP 2xx / 3xx.
+- `domain_error` — HTTP 4xx (caller mistakes).
+- `infra_error` — HTTP 5xx (service incidents).
+
+Splitting domain vs infra errors is essential to avoid alerting on user-driven
+4xx noise while still page-able on real outages.
+
+### Endpoints
+- `GET /metrics` — JSON snapshot (totals + per-route breakdown).
+- `GET /metrics/prometheus` — text exposition format with labelled series:
+
+  ```
+  chat_requests_by_route_total{route="/issues",method="GET",status_class="ok"} 12
+  chat_request_latency_ms_sum{route="/issues",method="GET"} 423.7
+  chat_request_latency_ms_count{route="/issues",method="GET"} 12
+  ```
+
+- `GET /dashboard` — HTML view rendering the JSON snapshot, auto-refreshed
+  every 5 s.
+
+### Backend
+Render's runtime stdout is streamed to the platform's log viewer. The Prometheus
+endpoint is scrapeable from Grafana Cloud / Prometheus / any metrics agent that
+speaks the OpenMetrics text format. The dashboard runs in-process for the demo
+video.
+
+## Shared Vertical Contract (HW3 Refactor)
+
+The Chat vertical (Teams 4 / 8 / 9) agreed on a unified `ChatClient` ABC and
+shared dataclasses (`Message`, `Channel`). The contract lives in
+[`Shared-API`](https://github.com/HarshithKoriRaj/Shared-API) and is consumed
+via `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+chat-client-api = { git = "https://github.com/HarshithKoriRaj/Shared-API" }
+```
+
+Team 9's existing `SlackClient` was refactored to satisfy the agreed contract
+(see `docs/SHARED_API_MEMO.md` for the full memo and Team 9 adaptation plan).
+Breaking changes propagated to `chat_client_service`, `chat_client_adapter`,
+and all tests.
+
+## Key Design Decisions (HW3)
+
+### AI client interface mirrors the HW1 chat-client pattern
+Same `register_X` / `get_X` factory shape so the service has a single mental
+model for dependency injection across verticals.
+
+### Tool handlers close over per-request state
+Chat tools close over the request's authenticated `ChatClient` so each AI call
+acts on behalf of the right Slack workspace; issue tools resolve the
+`TicketClient` lazily so swapping Jira ↔ legacy is purely env-driven.
+
+### Tool round cap
+The OpenAI loop is capped at 5 tool rounds to bound runaway recursion if the
+model hallucinates an endless tool chain.
+
+### Telemetry stays in-process
+A heavyweight metrics agent isn't justified at this scope; the Prometheus
+endpoint is sufficient to forward to a real backend, and the HTML dashboard is a
+zero-dep view for the demo. State is held under a `threading.Lock` for atomic
+updates.
+
+### Domain vs infrastructure error split
+Counting only `status >= 400` collapses 422 (caller mistake) and 503 (service
+outage). HW3 separates the two so dashboards/alerts can target real incidents.
+
+## HW2 Architecture (carried forward)
+
+The HW2 design (`chat_client_api`, `slack_client_impl`, `chat_client_service`,
+`chat_client_service_api_client`, `chat_client_adapter`, OAuth flow,
+in-memory session store, lazy adapter authentication) remains valid and is not
+re-described here. See git history at the `Hw2` branch tag and the
+`docs/hw2_traceability.md` page for the full HW2 mapping.
 
 ## Tradeoffs and Known Limitations
 
 | Area | Decision | Limitation |
 |------|----------|------------|
-| Session persistence | In-memory dict | Lost on restart; not suitable for production |
+| Session persistence | In-memory dict | Lost on restart; not production-grade |
 | Token storage | Session memory only | Not encrypted at rest |
-| Timestamps | Stored as strings | Less type-safe than `datetime`; chosen to match Slack API format |
-| Concurrency | No locking on session store | Race conditions possible under high load |
-| Client factory | Module-level callable | Not thread-safe if replaced concurrently |
+| Telemetry storage | Process memory | Lost on redeploy; intentional for demo scope |
+| AI tool loop | Sequential rounds | No parallel tool execution |
+| AI provider | Single (OpenAI) | Multi-provider swap is left as extra credit |
+| Issue tracker | Two providers wired | Live cutover depends on Jira team handoff |
+| Concurrency | `threading.Lock` on metrics; no lock on session store | Session race conditions possible at high load |

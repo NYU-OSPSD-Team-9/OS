@@ -117,3 +117,46 @@ Delete a message by its opaque `message_id`. Raises `ValueError` on failure.
 4. Update `SlackClient` to raise `ValueError` (not return a failure object) on API errors.
 5. Update the FastAPI service models and endpoints to reflect the new response shape.
 6. Update all unit and integration tests.
+
+---
+
+## Unified Credentials Approach
+
+All three Chat-vertical teams (Telegram, Discord, Slack) follow the same
+credentials model so cross-vertical consumers do not have to special-case any
+backend.
+
+### Storage rules
+
+1. **Never hardcoded, never committed.** Credentials live only in the platform's
+   environment store (Render env tab, AWS SSM, GCP Secret Manager, etc.). The
+   IaC definition (`terraform/main.tf` for Team 9) declares only non-secret env
+   vars; secret values are set manually through the platform dashboard or via a
+   privileged API call.
+2. **Env-only at the implementation layer.** Each `*_client_impl` reads its
+   provider credentials from a single, namespaced env var
+   (`SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`). The interface
+   package (`chat_client_api`) never sees credentials, never accepts auth
+   tokens as parameters, and never imports a provider SDK.
+3. **OAuth-bearing services hold tokens server-side.** Where a vertical exposes
+   a FastAPI service (Team 9), the service performs the OAuth handshake, stores
+   the resulting access token in a server-side session keyed by an opaque
+   session ID, and returns only the session ID to clients. Clients authenticate
+   via `X-Session-ID`; the access token never crosses the HTTP boundary.
+4. **CI deploys via deploy hooks, not secrets.** CircleCI uses the platform's
+   deploy hook URL (`RENDER_DEPLOY_HOOK_URL`) to trigger a deploy. The CI job
+   does not need access to provider credentials.
+
+### Per-team variables
+
+| Team | Provider | Required env vars |
+|------|----------|-------------------|
+| 4 (Telegram) | Telegram Bot API | `TELEGRAM_BOT_TOKEN` |
+| 8 (Discord) | Discord Bot API | `DISCORD_BOT_TOKEN` |
+| 9 (Slack) | Slack OAuth + Bot | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_REDIRECT_URI`, `SLACK_BOT_TOKEN` (local mode only) |
+
+### AI client credentials
+
+Teams that integrate an AI provider follow the same rule: provider key (e.g.
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) is read from the env in the impl
+package's factory and never enters the interface package or the wire format.
