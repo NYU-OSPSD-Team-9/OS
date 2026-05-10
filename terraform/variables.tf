@@ -44,7 +44,6 @@ variable "start_command" {
   type        = string
   default     = <<-EOT
     export PATH="$HOME/.local/bin:$PATH"
-    export PYTHONPATH="src:../chat_client_api/src:../slack_client_impl/src:../ai_client_api/src:../openai_ai_client_impl/src:../ticket_client_api/src:../http_ticket_client_impl/src"
     uv run uvicorn chat_client_service.main:app --host 0.0.0.0 --port $PORT
   EOT
 }
@@ -59,4 +58,10 @@ variable "openai_model" {
   description = "OpenAI model to use for AI completions."
   type        = string
   default     = "gpt-4o-mini"
+}
+
+variable "calendar_demo_mode" {
+  description = "Enable demo calendar mode for testing."
+  type        = string
+  default     = "false"
 }

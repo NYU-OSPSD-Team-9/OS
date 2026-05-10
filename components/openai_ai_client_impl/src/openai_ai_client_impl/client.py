@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Any
 
-from ai_client_api.client import AiClient, AiTool, TokenUsage, register_ai_client
+from ai_client_api.client import AiClient, AiTool, AiToolError, TokenUsage, register_ai_client
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -25,7 +25,7 @@ from tenacity import (
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 _DEFAULT_MAX_TOKENS = 1024
-_MAX_TOOL_ROUNDS = 5
+_MAX_TOOL_ROUNDS = int(os.getenv("OPENAI_MAX_TOOL_ROUNDS", "5"))
 _MAX_RETRY_ATTEMPTS = 3
 _RETRY_INITIAL_WAIT_SECONDS = 0.5
 _RETRY_MAX_WAIT_SECONDS = 4
@@ -295,7 +295,7 @@ class OpenAiClient(AiClient):
         if tool is not None and tool.handler is not None:
             try:
                 return tool.handler(**inputs)
-            except Exception as exc:  # noqa: BLE001
+            except (AiToolError, ValueError) as exc:
                 return json.dumps({"error": str(exc)})
         return json.dumps({"tool": name, "inputs": inputs, "status": "no_handler"})
 

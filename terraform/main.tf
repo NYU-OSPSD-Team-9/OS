@@ -32,7 +32,7 @@ resource "render_web_service" "chat_client_service" {
   env_vars = {
     "SLACK_SCOPES"       = { value = var.slack_scopes }
     "OPENAI_MODEL"       = { value = var.openai_model }
-    "CALENDAR_DEMO_MODE" = { value = "true" }
+    "CALENDAR_DEMO_MODE" = { value = var.calendar_demo_mode }
     "ENV"                = { value = "production" }
   }
 

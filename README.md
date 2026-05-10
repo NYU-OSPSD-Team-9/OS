@@ -190,8 +190,7 @@ The Chat Client Service is deployed as a public FastAPI web service on **Render*
 Start command:
 
 ```bash
-PYTHONPATH=src:../chat_client_api/src:../slack_client_impl/src:../chat_client_adapter/src:../chat_client_service_api_client/src:../ai_client_api/src:../openai_ai_client_impl/src:../ticket_client_api/src:../http_ticket_client_impl/src \
-  uvicorn chat_client_service.main:app --host 0.0.0.0 --port $PORT
+uv run uvicorn chat_client_service.main:app --host 0.0.0.0 --port $PORT
 ```
 
 ### Environment Variables
