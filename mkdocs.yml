@@ -1,0 +1,22 @@
+site_name: OSPSD Team 9 - Chat Client Service
+site_description: HW3 Slack-backed chat client with AI integration, cross-vertical Issue Tracker, IaC, and telemetry
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Design: design.md
+  - HW2 Traceability: hw2_traceability.md
+  - Components:
+      - Chat Client API: components/chat_client_api.md
+      - Slack Client Implementation: components/slack_client_impl.md
+      - Chat Client Service: components/chat_client_service.md
+      - Service API Client: components/chat_client_service_api_client.md
+      - Chat Client Adapter: components/chat_client_adapter.md
+      - AI Client API: components/ai_client_api.md
+      - OpenAI AI Client: components/openai_ai_client_impl.md
+      - Ticket Client API: components/ticket_client_api.md
+      - HTTP Ticket Client: components/http_ticket_client_impl.md
+  - Contributing: contributing.md

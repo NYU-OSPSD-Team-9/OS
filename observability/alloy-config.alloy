@@ -1,0 +1,39 @@
+// Grafana Alloy config for HW3 observability.
+//
+// Scrapes the deployed chat service's Prometheus endpoint every 30s and
+// remote-writes the result to Grafana Cloud Hosted Prometheus.
+//
+// Usage:
+//   export GC_PROM_URL="https://prometheus-prod-XX.grafana.net/api/prom/push"
+//   export GC_PROM_USER="123456"
+//   export GC_PROM_TOKEN="glc_..."
+//   alloy run observability/alloy-config.alloy
+//
+// Credentials are read from environment variables — never commit them.
+
+prometheus.scrape "ospsd_chat_service" {
+  targets = [
+    {
+      __address__       = "os-bmaq.onrender.com",
+      __scheme__        = "https",
+      __metrics_path__  = "/metrics/prometheus",
+      job               = "ospsd-team9-chat-service",
+      service           = "chat-client-service",
+      env               = "production",
+    },
+  ]
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GC_PROM_URL")
+
+    basic_auth {
+      username = sys.env("GC_PROM_USER")
+      password = sys.env("GC_PROM_TOKEN")
+    }
+  }
+}

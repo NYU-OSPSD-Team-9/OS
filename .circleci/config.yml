@@ -1,0 +1,66 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - run:
+          name: Install dependencies
+          command: |
+            export PATH="$HOME/.local/bin:$PATH"
+            uv sync --all-packages
+      - run:
+          name: Run ruff
+          command: |
+            export PATH="$HOME/.local/bin:$PATH"
+            uv run ruff check .
+      - run:
+          name: Run mypy
+          command: |
+            export PATH="$HOME/.local/bin:$PATH"
+            uv run mypy .
+      - run:
+          name: Run tests with coverage
+          command: |
+            export PATH="$HOME/.local/bin:$PATH"
+            uv run pytest --junitxml=test-results/junit.xml --cov=components --cov-report=html --cov-report=xml
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: htmlcov
+          destination: coverage-report
+      - store_artifacts:
+          path: coverage.xml
+
+  deploy:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - run:
+          name: Trigger Render deploy
+          command: |
+            if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
+              echo "RENDER_DEPLOY_HOOK_URL not set — skipping deploy"
+              exit 0
+            fi
+            echo "Triggering deploy via Render deploy hook..."
+            curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+              --request POST "${RENDER_DEPLOY_HOOK_URL}"
+
+workflows:
+  main:
+    jobs:
+      - test
+      - deploy:
+          requires:
+            - test
+          filters:
+            branches:
+              only:
+                - main
+                - HW3

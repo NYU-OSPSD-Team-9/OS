@@ -1,0 +1,118 @@
+[project]
+name = "ospsd-team9-hw3"
+version = "0.3.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.135.1",
+    "slack-sdk>=3.40.0",
+    "uvicorn>=0.42.0",
+    "openai>=1.0.0",
+    "httpx>=0.27.0",
+    "tenacity>=8.0.0",
+    "work-mgmt-client-interface",
+    "calendar-client-api",
+]
+
+[dependency-groups]
+dev = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.14",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.8.0",
+    "openapi-python-client>=0.26.2",
+    "ruff>=0.1.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "components/chat_client_adapter",
+    "components/slack_client_impl",
+    "components/chat_client_service",
+    "components/chat_client_service_api_client",
+    "components/ai_client_api",
+    "components/openai_ai_client_impl",
+    "components/ticket_client_api",
+    "components/http_ticket_client_impl",
+]
+
+[tool.uv.sources]
+chat-client-api = { git = "https://github.com/HarshithKoriRaj/Shared-API" }
+work-mgmt-client-interface = { git = "https://github.com/shubham739/team-diamonds.git", branch = "HW-3", subdirectory = "components/work_mgmt_client_interface" }
+calendar-client-api = { git = "https://github.com/bk00119/ospsd-outlook-calendar-team12.git", branch = "hw-3", subdirectory = "src/calendar_client_api" }
+chat-client-adapter = { workspace = true }
+slack-client-impl = { workspace = true }
+chat-client-service = { workspace = true }
+chat-client-service-api-client = { workspace = true }
+ai-client-api = { workspace = true }
+openai-ai-client-impl = { workspace = true }
+ticket-client-api = { workspace = true }
+http-ticket-client-impl = { workspace = true }
+
+[tool.ruff]
+line-length = 88
+extend-exclude = [
+    "components/chat_client_service_api_client/chat_client_service_api_client",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203",  # Conflicts with D211
+    "D213",  # Conflicts with D212
+    # Test file exceptions
+    "S101",  # Use of assert (needed for pytest)
+    "S105",  # Possible hardcoded password (test tokens are not real secrets)
+    "INP001",  # Implicit namespace package (tests don't need __init__.py)
+    "ANN201",  # Missing return type annotation (acceptable for test functions)
+    "ARG001",  # Unused function argument (interface conformance in tests)
+    "ARG002",  # Unused method arguments (interface methods in tests)
+    "SLF001",  # Private member access (testing internal state)
+    "SIM117",  # Nested with statements (acceptable for test clarity)
+    "ANN401",  # Dynamically typed Any (needed for generic dicts/tools)
+    "EM101",   # Exception with string literal (msg= pattern used where needed)
+    "TRY003",  # Long exception messages (descriptive errors are fine)
+    # Minor formatting exceptions
+    "ERA001",  # Commented code (useful for TODOs in first draft)
+    "FIX002",  # TODO comments (acceptable for first draft)
+    "TD002",  # TODO missing author
+    "TD003",  # TODO missing issue link
+    "PLC0415",  # Import not at top (needed for DI tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"components/chat_client_service/src/chat_client_service/main.py" = ["TC002"]
+"**/tests/**" = ["PLR2004"]
+"tests/**" = ["PLR2004"]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+exclude = [
+    "components/chat_client_service_api_client/chat_client_service_api_client",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+    "components/chat_client_adapter/tests",
+    "components/slack_client_impl/tests",
+    "components/chat_client_service/tests",
+    "components/ai_client_api/tests",
+    "components/openai_ai_client_impl/tests",
+    "components/ticket_client_api/tests",
+    "components/http_ticket_client_impl/tests",
+]
+python_files = "test_*.py"
+
+[tool.coverage.run]
+branch = true
+source = ["components"]
+omit = [
+    "components/chat_client_service_api_client/chat_client_service_api_client/*",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

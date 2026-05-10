@@ -1,0 +1,20 @@
+[project]
+name = "chat-client-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "slack-sdk>=3.27.0",
+    "chat-client-api",
+    "slack-client-impl",
+    "ai-client-api",
+    "httpx>=0.28.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chat_client_service"]

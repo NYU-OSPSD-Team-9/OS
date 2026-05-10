@@ -1,0 +1,9 @@
+[project]
+name = "ai-client-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Abstract interface for AI chat completion clients"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

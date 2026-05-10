@@ -134,6 +134,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Credentials
+credentials.json
+token.json
+
 # Environments
 .env
 .envrc
@@ -205,3 +209,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local dev SSL certs
+localhost.crt
+localhost.key
+
+# ngrok binary
+ngrok.exe
+
+# Grafana Alloy local agent runtime state (WAL, seed file)
+observability/alloy-data/
