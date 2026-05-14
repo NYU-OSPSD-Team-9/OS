@@ -216,3 +216,6 @@ localhost.key
 
 # ngrok binary
 ngrok.exe
+
+# Grafana Alloy local agent runtime state (WAL, seed file)
+observability/alloy-data/

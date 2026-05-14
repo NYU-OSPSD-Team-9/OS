@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: chat-client-service
+    runtime: python
+    rootDir: components/chat_client_service
+    buildCommand: |
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.local/bin:$PATH"
+      cd /opt/render/project/src
+      uv sync --all-packages
+    startCommand: |
+      export PATH="$HOME/.local/bin:$PATH"
+      uv run uvicorn chat_client_service.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: SLACK_REDIRECT_URI
+        sync: false
+      - key: SLACK_SCOPES
+        value: "chat:write,channels:read,channels:history,chat:write.public"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: "gpt-4o-mini"
+      - key: JIRA_SERVICE_BASE_URL
+        sync: false
+      - key: JIRA_SERVICE_ACCESS_TOKEN
+        sync: false
+      - key: TICKET_SERVICE_BASE_URL
+        sync: false
+      - key: TICKET_BOARD_ID
+        sync: false
+      - key: CALENDAR_DEMO_MODE
+        value: "true"
+      - key: ENV
+        value: production

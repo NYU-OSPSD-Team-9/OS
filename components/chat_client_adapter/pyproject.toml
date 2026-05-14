@@ -6,6 +6,7 @@ description = "Adapter implementing the ChatClient contract over the remote serv
 dependencies = [
     "chat-client-api",
     "chat-client-service-api-client",
+    "httpx>=0.23.0",
 ]
 
 [build-system]

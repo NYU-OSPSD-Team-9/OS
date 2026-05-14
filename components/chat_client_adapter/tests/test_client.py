@@ -24,7 +24,6 @@ from chat_client_adapter.client import (
 from chat_client_api.client import (
     Channel,
     Message,
-    SendMessageResponse,
     _ClientRegistry,
     get_client,
 )
@@ -68,7 +67,7 @@ class FakeGateway:
         """Record which session IDs were deleted."""
         self.deleted_sessions.append(session_id)
 
-    def list_channels(self, session_id: str) -> list[Channel]:
+    def get_channels(self, session_id: str) -> list[Channel]:
         """Return a deterministic channel list."""
         self.listed_sessions.append(session_id)
         return [
@@ -79,19 +78,24 @@ class FakeGateway:
             ),
         ]
 
+    def get_channel(self, session_id: str, channel_id: str) -> Channel:
+        """Return a deterministic single channel."""
+        return Channel(channel_id=channel_id, name="general", is_private=False)
+
     def send_message(
         self,
         session_id: str,
         channel: str,
         text: str,
-    ) -> SendMessageResponse:
+    ) -> Message:
         """Record and echo the message send request."""
         self.sent_messages.append((session_id, channel, text))
-        return SendMessageResponse(
-            message_id="123",
+        return Message(
+            message_id=f"{channel}:12345.678",
             channel=channel,
+            text=text,
+            sender="",
             timestamp="12345.678",
-            ok=True,
         )
 
     def get_messages(
@@ -104,6 +108,23 @@ class FakeGateway:
         """Return no messages for tests that do not exercise history."""
         del session_id, channel, limit, cursor
         return []
+
+    def get_message(self, session_id: str, message_id: str) -> Message:
+        """Return a deterministic single message."""
+        del session_id
+        parts = message_id.split(":", 1)
+        channel = parts[0] if len(parts) == 2 else "C001"
+        return Message(
+            message_id=message_id,
+            channel=channel,
+            text="Hello",
+            sender="U001",
+            timestamp="12345.678",
+        )
+
+    def delete_message(self, session_id: str, message_id: str) -> None:
+        """Accept delete without error."""
+        del session_id, message_id
 
 
 def setup_function() -> None:
@@ -127,8 +148,8 @@ def test_begin_authentication_stores_session_id() -> None:
     assert gateway.create_calls == 1
 
 
-def test_list_channels_uses_existing_session() -> None:
-    """The adapter should forward list_channels through the gateway."""
+def test_get_channels_uses_existing_session() -> None:
+    """The adapter should forward get_channels through the gateway."""
     gateway = FakeGateway()
     adapter = ChatClientServiceAdapter(
         base_url="http://service.local",
@@ -137,10 +158,108 @@ def test_list_channels_uses_existing_session() -> None:
         auth_config=AdapterAuthConfig(open_browser=False),
     )
 
-    channels = adapter.list_channels()
+    channels = adapter.get_channels()
 
     assert [channel.name for channel in channels] == ["general"]
     assert gateway.listed_sessions == ["session-123"]
+
+
+def test_get_channel_returns_channel() -> None:
+    """The adapter should return a single channel from the gateway."""
+    gateway = FakeGateway()
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+
+    channel = adapter.get_channel("C001")
+    assert channel.channel_id == "C001"
+
+
+def test_get_channel_raises_value_error_on_adapter_error() -> None:
+    """get_channel should convert ChatClientAdapterError to ValueError."""
+    gateway = FakeGateway()
+
+    def bad_get_channel(session_id: str, channel_id: str) -> Channel:
+        raise ChatClientAdapterError("not found")
+
+    gateway.get_channel = bad_get_channel  # type: ignore[method-assign]
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+
+    with pytest.raises(ValueError, match="Channel not found"):
+        adapter.get_channel("C999")
+
+
+def test_get_message_returns_message() -> None:
+    """The adapter should return a single message from the gateway."""
+    gateway = FakeGateway()
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+
+    msg = adapter.get_message("C001:12345.678")
+    assert msg.message_id == "C001:12345.678"
+    assert msg.text == "Hello"
+
+
+def test_get_message_raises_value_error_on_adapter_error() -> None:
+    """get_message should convert ChatClientAdapterError to ValueError."""
+    gateway = FakeGateway()
+
+    def bad_get_message(session_id: str, message_id: str) -> Message:
+        raise ChatClientAdapterError("not found")
+
+    gateway.get_message = bad_get_message  # type: ignore[method-assign]
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+
+    with pytest.raises(ValueError, match="Message not found"):
+        adapter.get_message("C001:12345.678")
+
+
+def test_delete_message_succeeds() -> None:
+    """The adapter should call gateway.delete_message without error."""
+    gateway = FakeGateway()
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+    adapter.delete_message("C001:12345.678")  # should not raise
+
+
+def test_delete_message_raises_value_error_on_adapter_error() -> None:
+    """delete_message should convert ChatClientAdapterError to ValueError."""
+    gateway = FakeGateway()
+
+    def bad_delete(session_id: str, message_id: str) -> None:
+        raise ChatClientAdapterError("forbidden")
+
+    gateway.delete_message = bad_delete  # type: ignore[method-assign]
+    adapter = ChatClientServiceAdapter(
+        base_url="http://service.local",
+        session_id="session-123",
+        gateway=gateway,
+        auth_config=AdapterAuthConfig(open_browser=False),
+    )
+
+    with pytest.raises(ValueError, match="Failed to delete message"):
+        adapter.delete_message("C001:12345.678")
 
 
 def test_send_message_triggers_lazy_authentication() -> None:
@@ -164,7 +283,7 @@ def test_send_message_triggers_lazy_authentication() -> None:
         response = adapter.send_message("C001", "Hello from adapter")
         assert os.environ["CHAT_CLIENT_SERVICE_SESSION_ID"] == "session-123"
 
-    assert response.ok is True
+    assert response.channel == "C001"
     assert gateway.create_calls == 1
     assert gateway.sent_messages == [("session-123", "C001", "Hello from adapter")]
     mock_open.assert_called_once_with(gateway.auth_session.login_url)
@@ -212,9 +331,25 @@ def test_import_registers_service_adapter() -> None:
 
 def test_openapi_gateway_maps_generated_responses() -> None:
     """The OpenAPI gateway should translate generated results into core DTOs."""
+    mock_httpx = mock.MagicMock()
+    mock_httpx.get.return_value = mock.MagicMock(
+        status_code=200,
+        json=lambda: {
+            "channel_id": "C001",
+            "name": "general",
+            "is_private": False,
+        },
+        raise_for_status=lambda: None,
+    )
+    mock_httpx.delete.return_value = mock.MagicMock(
+        status_code=200,
+        raise_for_status=lambda: None,
+    )
+
     gateway = OpenAPIServiceGateway(
         base_url="http://service.local",
         client=GeneratedClient(base_url="http://service.local"),
+        http_client=mock_httpx,
     )
 
     with (
@@ -253,7 +388,7 @@ def test_openapi_gateway_maps_generated_responses() -> None:
         mock.patch(
             "chat_client_adapter.client.send_message_api.sync",
             return_value=SimpleNamespace(
-                message_id="123",
+                message_id="C001:12345.678",
                 channel="C001",
                 timestamp="12345.678",
                 ok=True,
@@ -264,7 +399,7 @@ def test_openapi_gateway_maps_generated_responses() -> None:
             return_value=SimpleNamespace(
                 messages=[
                     SimpleNamespace(
-                        message_id="123",
+                        message_id="C001:12345.678",
                         channel="C001",
                         text="Hello",
                         sender="U001",
@@ -277,15 +412,57 @@ def test_openapi_gateway_maps_generated_responses() -> None:
         auth_session = gateway.create_auth_session()
         auth_status = gateway.get_auth_session_status("session-123")
         gateway.delete_auth_session("session-123")
-        channels = gateway.list_channels("session-123")
+        channels = gateway.get_channels("session-123")
         send_response = gateway.send_message("session-123", "C001", "Hello")
         messages = gateway.get_messages("session-123", "C001")
+        channel = gateway.get_channel("session-123", "C001")
+        gateway.delete_message("session-123", "C001:12345.678")
 
     assert auth_session.session_id == "session-123"
     assert auth_status.authenticated is True
-    assert [channel.name for channel in channels] == ["general"]
-    assert send_response.ok is True
-    assert [message.text for message in messages] == ["Hello"]
+    assert [ch.name for ch in channels] == ["general"]
+    assert send_response.channel == "C001"
+    assert [msg.text for msg in messages] == ["Hello"]
+    assert channel.channel_id == "C001"
+
+
+def test_openapi_gateway_get_channel_404() -> None:
+    """get_channel should raise ChatClientAdapterError on 404."""
+    mock_httpx = mock.MagicMock()
+    mock_httpx.get.return_value = mock.MagicMock(status_code=404)
+    gateway = OpenAPIServiceGateway(
+        base_url="http://service.local",
+        client=GeneratedClient(base_url="http://service.local"),
+        http_client=mock_httpx,
+    )
+    with pytest.raises(ChatClientAdapterError, match="Channel not found"):
+        gateway.get_channel("session-123", "C999")
+
+
+def test_openapi_gateway_get_message_404() -> None:
+    """get_message should raise ChatClientAdapterError on 404."""
+    mock_httpx = mock.MagicMock()
+    mock_httpx.get.return_value = mock.MagicMock(status_code=404)
+    gateway = OpenAPIServiceGateway(
+        base_url="http://service.local",
+        client=GeneratedClient(base_url="http://service.local"),
+        http_client=mock_httpx,
+    )
+    with pytest.raises(ChatClientAdapterError, match="Message not found"):
+        gateway.get_message("session-123", "C001:99999")
+
+
+def test_openapi_gateway_delete_message_404() -> None:
+    """delete_message should raise ChatClientAdapterError on 404."""
+    mock_httpx = mock.MagicMock()
+    mock_httpx.delete.return_value = mock.MagicMock(status_code=404)
+    gateway = OpenAPIServiceGateway(
+        base_url="http://service.local",
+        client=GeneratedClient(base_url="http://service.local"),
+        http_client=mock_httpx,
+    )
+    with pytest.raises(ChatClientAdapterError, match="Message not found"):
+        gateway.delete_message("session-123", "C001:99999")
 
 
 def test_openapi_gateway_rejects_empty_and_validation_responses() -> None:

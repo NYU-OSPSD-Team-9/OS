@@ -8,6 +8,7 @@ dependencies = [
     "slack-sdk>=3.27.0",
     "chat-client-api",
     "slack-client-impl",
+    "ai-client-api",
     "httpx>=0.28.1",
 ]
 

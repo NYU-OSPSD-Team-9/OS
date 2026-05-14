@@ -1,0 +1,7 @@
+service_name = "chat-client-service-stg"
+plan         = "free"
+region       = "oregon"
+repo_url     = "https://github.com/NYU-OSPSD-Team-9/OS"
+branch       = "HW3-final"
+openai_model = "gpt-4o-mini"
+slack_scopes = "chat:write,channels:read,channels:history,chat:write.public"

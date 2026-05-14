@@ -13,7 +13,6 @@ from chat_client_api.client import (
     Channel,
     ChatClient,
     Message,
-    SendMessageResponse,
     register_client,
 )
 from chat_client_service_api_client.api.default import (
@@ -92,15 +91,18 @@ class ServiceGateway(Protocol):
     def delete_auth_session(self, session_id: str) -> None:
         """Delete an auth session."""
 
-    def list_channels(self, session_id: str) -> list[Channel]:
+    def get_channels(self, session_id: str) -> list[Channel]:
         """List channels for the authenticated service session."""
+
+    def get_channel(self, session_id: str, channel_id: str) -> Channel:
+        """Get a single channel for the authenticated service session."""
 
     def send_message(
         self,
         session_id: str,
         channel: str,
         text: str,
-    ) -> SendMessageResponse:
+    ) -> Message:
         """Send a message through the authenticated service session."""
 
     def get_messages(
@@ -112,6 +114,12 @@ class ServiceGateway(Protocol):
     ) -> list[Message]:
         """Fetch messages through the authenticated service session."""
 
+    def get_message(self, session_id: str, message_id: str) -> Message:
+        """Fetch a single message through the authenticated service session."""
+
+    def delete_message(self, session_id: str, message_id: str) -> None:
+        """Delete a message through the authenticated service session."""
+
 
 class OpenAPIServiceGateway:
     """Thin gateway wrapping the generated OpenAPI client."""
@@ -122,6 +130,7 @@ class OpenAPIServiceGateway:
         *,
         timeout_seconds: float = 20.0,
         client: GeneratedClient | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         """Initialize the gateway around the generated OpenAPI client."""
         normalized_base_url = base_url.rstrip("/")
@@ -129,6 +138,10 @@ class OpenAPIServiceGateway:
             base_url=normalized_base_url,
             follow_redirects=False,
             raise_on_unexpected_status=True,
+            timeout=httpx.Timeout(timeout_seconds),
+        )
+        self._base_url = normalized_base_url
+        self._http_client = http_client or httpx.Client(
             timeout=httpx.Timeout(timeout_seconds),
         )
 
@@ -161,7 +174,7 @@ class OpenAPIServiceGateway:
             delete_auth_session_api.sync(session_id=session_id, client=self._client),
         )
 
-    def list_channels(self, session_id: str) -> list[Channel]:
+    def get_channels(self, session_id: str) -> list[Channel]:
         """List channels using the generated client."""
         response = self._expect_result(
             list_channels_api.sync(client=self._client, x_session_id=session_id),
@@ -175,12 +188,29 @@ class OpenAPIServiceGateway:
             for channel in response.channels
         ]
 
+    def get_channel(self, session_id: str, channel_id: str) -> Channel:
+        """Get a single channel via direct HTTP call."""
+        response = self._http_client.get(
+            f"{self._base_url}/channels/{channel_id}",
+            headers={"X-Session-ID": session_id},
+        )
+        if response.status_code == 404:  # noqa: PLR2004
+            msg = f"Channel not found: {channel_id}"
+            raise ChatClientAdapterError(msg)
+        response.raise_for_status()
+        data = response.json()
+        return Channel(
+            channel_id=str(data["channel_id"]),
+            name=str(data["name"]),
+            is_private=bool(data["is_private"]),
+        )
+
     def send_message(
         self,
         session_id: str,
         channel: str,
         text: str,
-    ) -> SendMessageResponse:
+    ) -> Message:
         """Send a message using the generated client."""
         response = self._expect_result(
             send_message_api.sync(
@@ -189,11 +219,12 @@ class OpenAPIServiceGateway:
                 x_session_id=session_id,
             ),
         )
-        return SendMessageResponse(
+        return Message(
             message_id=response.message_id,
             channel=response.channel,
+            text=text,
+            sender="",
             timestamp=response.timestamp,
-            ok=response.ok,
         )
 
     def get_messages(
@@ -223,6 +254,36 @@ class OpenAPIServiceGateway:
             )
             for message in response.messages
         ]
+
+    def get_message(self, session_id: str, message_id: str) -> Message:
+        """Get a single message via direct HTTP call."""
+        response = self._http_client.get(
+            f"{self._base_url}/messages/{message_id}",
+            headers={"X-Session-ID": session_id},
+        )
+        if response.status_code == 404:  # noqa: PLR2004
+            msg = f"Message not found: {message_id}"
+            raise ChatClientAdapterError(msg)
+        response.raise_for_status()
+        data = response.json()
+        return Message(
+            message_id=str(data["message_id"]),
+            channel=str(data["channel"]),
+            text=str(data["text"]),
+            sender=str(data["sender"]),
+            timestamp=str(data["timestamp"]),
+        )
+
+    def delete_message(self, session_id: str, message_id: str) -> None:
+        """Delete a message via direct HTTP call."""
+        response = self._http_client.delete(
+            f"{self._base_url}/messages/{message_id}",
+            headers={"X-Session-ID": session_id},
+        )
+        if response.status_code == 404:  # noqa: PLR2004
+            msg = f"Message not found: {message_id}"
+            raise ChatClientAdapterError(msg)
+        response.raise_for_status()
 
     def _expect_result(
         self,
@@ -273,7 +334,7 @@ class ChatClientServiceAdapter(ChatClient):
             time.sleep(self.auth_config.poll_interval_seconds)
 
         msg = (
-            "Slack OAuth did not complete before the configured timeout expired. "
+            "OAuth authentication did not complete before the timeout expired. "
             "Open the login URL again and retry."
         )
         raise ChatClientAuthenticationTimeoutError(msg)
@@ -293,19 +354,30 @@ class ChatClientServiceAdapter(ChatClient):
         self.session_id = None
         os.environ.pop("CHAT_CLIENT_SERVICE_SESSION_ID", None)
 
-    def send_message(self, channel: str, text: str) -> SendMessageResponse:
+    def send_message(self, channel_id: str, text: str) -> Message:
         """Send a message via the remote chat client service."""
         session_id = self._ensure_authenticated_session_id()
         return self.gateway.send_message(
             session_id=session_id,
-            channel=channel,
+            channel=channel_id,
             text=text,
         )
 
-    def list_channels(self) -> list[Channel]:
+    def get_channels(self) -> list[Channel]:
         """List channels via the remote chat client service."""
         session_id = self._ensure_authenticated_session_id()
-        return self.gateway.list_channels(session_id=session_id)
+        return self.gateway.get_channels(session_id=session_id)
+
+    def get_channel(self, channel_id: str) -> Channel:
+        """Get a single channel via the remote chat client service."""
+        session_id = self._ensure_authenticated_session_id()
+        try:
+            return self.gateway.get_channel(
+                session_id=session_id, channel_id=channel_id,
+            )
+        except ChatClientAdapterError as exc:
+            msg = f"Channel not found: {channel_id}"
+            raise ValueError(msg) from exc
 
     def get_messages(
         self,
@@ -321,6 +393,26 @@ class ChatClientServiceAdapter(ChatClient):
             limit=limit,
             cursor=cursor,
         )
+
+    def get_message(self, message_id: str) -> Message:
+        """Get a single message via the remote chat client service."""
+        session_id = self._ensure_authenticated_session_id()
+        try:
+            return self.gateway.get_message(
+                session_id=session_id, message_id=message_id,
+            )
+        except ChatClientAdapterError as exc:
+            msg = f"Message not found: {message_id}"
+            raise ValueError(msg) from exc
+
+    def delete_message(self, message_id: str) -> None:
+        """Delete a message via the remote chat client service."""
+        session_id = self._ensure_authenticated_session_id()
+        try:
+            self.gateway.delete_message(session_id=session_id, message_id=message_id)
+        except ChatClientAdapterError as exc:
+            msg = f"Failed to delete message: {message_id}"
+            raise ValueError(msg) from exc
 
     def _ensure_authenticated_session_id(self) -> str:
         if self.session_id is None:
